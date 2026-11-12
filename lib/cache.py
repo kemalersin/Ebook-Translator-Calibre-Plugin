@@ -11,7 +11,7 @@ from glob import glob
 
 from calibre.utils.localization import _  # type: ignore
 
-from .utils import size_by_unit
+from .utils import size_by_unit, uid
 from .config import get_config
 
 
@@ -43,9 +43,14 @@ class Paragraph:
             return json.loads(self.attributes)
         return {}
 
-    def is_alignment(self, separator: str) -> bool:
+    def is_alignment(self, separator: str, placeholder=None) -> bool:
         if self.translation is None or self.translation.strip() == '':
             return True
+        cue_ids = self.get_attributes().get('cues')
+        if cue_ids is not None and placeholder is not None:
+            from .srt import parse_marked_text
+            return parse_marked_text(
+                self.translation, placeholder, cue_ids) is not None
         pattern = re.compile(separator)
         count_original = len(pattern.split(self.original.strip()))
         count_translation = len(pattern.split(self.translation.strip()))
@@ -317,6 +322,22 @@ class TranslationCache:
 
     def ignore_paragraphs(self, paragraphs):
         self.ignore([paragraph.id for paragraph in paragraphs])
+
+
+def get_cache_id(
+        input_path, engine_name, target_lang, merge_length, encoding,
+        input_format):
+    """The SRT version is part of the identity because the way subtitles are
+    split and merged changed; caches built before cannot be reused.
+    """
+    _encoding = '' if encoding.lower() == 'utf-8' else encoding.lower()
+    version = ''
+    if input_format == 'srt':
+        from .srt import SRT_CACHE_VERSION
+        version = SRT_CACHE_VERSION
+    return uid(
+        input_path + engine_name + target_lang + str(merge_length)
+        + _encoding + version)
 
 
 def get_cache(uid):

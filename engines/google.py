@@ -1,9 +1,11 @@
 import os
+import re
 import sys
 import time
 import json
 from html import unescape
 from subprocess import Popen, PIPE
+from urllib.parse import urlencode, quote_plus
 
 from ..lib.utils import request, traceback_error
 
@@ -22,17 +24,100 @@ class GoogleFreeTranslateNew(Base):
     lang_codes = Base.load_lang_codes(google)
     endpoint = 'https://translate-pa.googleapis.com/v1/translate'
     need_api_key = False
+    rejected_errors = [r'HTTP Error 400\b']
+    # The text travels in the query string. Google rejects URLs longer than
+    # about 16 KB, and a non-Latin character takes up to 9 bytes once
+    # percent-encoded.
+    max_url_length = 14000
+    split_patterns = (
+        r'\n{2,}', r'\n', r'(?<=[.!?;:。！？；])\s+|(?<=[。！？；])', r'\s+')
+    atom_pattern = re.compile(r'\{\{\s*id\s*_\s*\w+\s*\}\}|.', re.S)
 
     def get_headers(self):
         return {
             'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
+            # The response is decoded as plain UTF-8 text.
+            'Accept-Encoding': 'identity',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 '
             'Safari/537.36',
         }
+
+    def get_url_length(self, text):
+        return len(self.endpoint) + 1 + len(urlencode(self.get_body(text)))
+
+    def split_text(self, text):
+        """Split the text into (chunk, delimiter) pairs whose request URLs fit
+        the limit. Joining every chunk with its delimiter gives the text back.
+        """
+        budget = self.max_url_length - self.get_url_length('')
+        return self._split(text, budget, 0)
+
+    def _split(self, text, budget, level):
+        if len(quote_plus(text)) <= budget:
+            return [(text, '')]
+        if level == len(self.split_patterns):
+            return self._split_atoms(text, budget)
+        parts = re.split('(%s)' % self.split_patterns[level], text)
+        chunks: list[tuple[str, str]] = []
+        current: tuple[str, str] | None = None
+        for index in range(0, len(parts), 2):
+            segment = parts[index]
+            delimiter = parts[index + 1] if index + 1 < len(parts) else ''
+            if current is not None:
+                joined = current[0] + current[1] + segment
+                if len(quote_plus(joined)) <= budget:
+                    current = (joined, delimiter)
+                    continue
+                chunks.append(current)
+                current = None
+            if len(quote_plus(segment)) <= budget:
+                current = (segment, delimiter)
+                continue
+            pieces = self._split(segment, budget, level + 1)
+            chunks.extend(pieces[:-1])
+            current = (pieces[-1][0], pieces[-1][1] + delimiter)
+        if current is not None:
+            chunks.append(current)
+        return chunks
+
+    def _split_atoms(self, text, budget):
+        """Split by characters, keeping placeholders whole."""
+        chunks: list[tuple[str, str]] = []
+        current = ''
+        for atom in self.atom_pattern.findall(text):
+            if current and len(quote_plus(current + atom)) > budget:
+                chunks.append((current, ''))
+                current = ''
+            current += atom
+        return chunks + [(current, '')]
+
+    def _translate_chunks(self, content):
+        chunks = self.split_text(content)
+        if len(chunks) == 1:
+            return Base.translate(self, content)
+        return ''.join(
+            (Base.translate(self, chunk) if chunk.strip() else chunk)
+            + delimiter for chunk, delimiter in chunks)
+
+    def _count_paragraphs(self, text):
+        pattern = re.compile('%s+' % self.separator)
+        return len(pattern.sub(self.separator, text).strip().split(
+            self.separator))
+
+    def translate(self, content):
+        translation = self._translate_chunks(content)
+        if not self.merge_enabled:
+            return translation
+        # The service sometimes merges, drops or repeats paragraphs, which
+        # would shift every translation of the merged group.
+        paragraphs = content.strip().split(self.separator)
+        if len(paragraphs) < 2 or \
+                self._count_paragraphs(translation) == len(paragraphs):
+            return translation
+        return self.separator.join(
+            self._translate_chunks(paragraph) for paragraph in paragraphs)
 
     def get_body(self, text):
         self.method = 'GET'
@@ -368,6 +453,8 @@ class GeminiTranslate(GenAI):
             prompt += (
                 ' Ensure that placeholders matching the pattern {{id_\\d+}} '
                 'in the content are retained.')
+        if self.prompt_extension:
+            prompt += ' ' + self.prompt_extension
         return prompt + ' Start translating: ' + text
 
     def get_models(self):

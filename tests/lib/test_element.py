@@ -41,14 +41,19 @@ class TestFunction(unittest.TestCase):
         xhtml = '<p xmlns="http://www.w3.org/1999/xhtml">a</p>'
         self.assertEqual('p', get_name(etree.XML(xhtml)))
 
-    @patch('calibre_plugins.ebook_translator.lib.element.open_file')
+    @patch('calibre_plugins.ebook_translator.lib.srt.open_file')
     def test_get_srt_elements(self, mock_open_file):
-        mock_open_file.return_value = '01:00\n0\na\nb\n\n02:00\n1\nc\n\n'
+        mock_open_file.return_value = (
+            '1\n00:00:01,000 --> 00:00:02,000\na\nb\n\n'
+            '2\n00:00:03,000 --> 00:00:04,000\nc\n\n')
         elements = get_srt_elements('/path/to/srt', 'utf-8')
         mock_open_file.assert_called_once_with('/path/to/srt', 'utf-8')
         self.assertEqual(2, len(elements))
-        self.assertEqual(['01:00', '0', 'a\nb'], elements[0].element)
-        self.assertEqual(['02:00', '1', 'c'], elements[1].element)
+        self.assertEqual(
+            ['1', '00:00:01,000 --> 00:00:02,000', 'a\nb'],
+            elements[0].element)
+        self.assertEqual(
+            ['2', '00:00:03,000 --> 00:00:04,000', 'c'], elements[1].element)
 
     @patch('calibre_plugins.ebook_translator.lib.element.open_file')
     def test_get_pgn_elements(self, mock_open_file):
@@ -545,6 +550,23 @@ class TestPageElement(unittest.TestCase):
         self.assertEqual(0, len(list(right_td)))
         self.assertEqual('40%', right_td.get('width'))
         self.assertIsNone(right_td.text)
+
+    def test_add_translation_keeps_dropped_reserved_elements(self):
+        xhtml = etree.XML(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<p>a<sup>[1]</sup> b <img src="x.jpg"/> c</p></body></html>')
+        element = PageElement(xhtml.find('.//x:p', namespaces=ns), 'p1')
+        element.reserve_pattern = create_xpath(('sup', 'img'))
+        element.set_placeholder(Base.placeholder)
+        element.position = 'only'
+        self.assertEqual('a{{id_00000}} b {{id_00001}} c', element.get_content())
+        element.add_translation('A B {{id_00001}} C')
+
+        elements = xhtml.findall('.//x:p', namespaces=ns)
+        self.assertEqual(1, len(elements))
+        self.assertEqual(
+            '<p dir="auto">A B <img src="x.jpg"/> C<sup>[1]</sup></p>',
+            get_string(elements[0], True))
 
     def test_add_translation_with_placeholder(self):
         self.element.set_placeholder(Base.placeholder)

@@ -18,11 +18,13 @@ from calibre.ebooks.metadata.meta import (  # type: ignore
 from .. import EbookTranslator
 
 from .config import get_config
-from .utils import log, sep, uid, open_path, open_file
-from .cache import get_cache
+from .utils import log, sep, open_path, open_file
+from .cache import get_cache, get_cache_id
 from .element import (
-    get_element_handler, get_srt_elements, get_toc_elements, get_page_elements,
+    get_element_handler, get_toc_elements, get_page_elements,
     get_metadata_elements, get_pgn_elements)
+from .srt import (
+    get_srt_elements, compose_srt, repair_srt_groups, srt_prompt_extension)
 from .translation import get_translator, get_translation
 from .exception import ConversionAbort
 
@@ -100,14 +102,19 @@ def convert_srt(
     paragraphs = cache.all_paragraphs()
     translation.set_progress(notification)
     translation.handle(paragraphs)
-    element_handler.add_translations(paragraphs)
+    repaired = {}
+    if not cache.cache_only:
+        repaired = repair_srt_groups(
+            translation, paragraphs, element_handler.placeholder,
+            cache.update_paragraph)
+    element_handler.add_translations(paragraphs, repaired)
 
     log.info(sep())
     log.info(_('Starting to output subtitles file...'))
     log.info(sep())
 
     with open(output_path, 'w', encoding='utf-8') as file:
-        file.write('\n\n'.join([e.get_translation() for e in elements]))
+        file.write(compose_srt(elements))
 
     log.info(_('The translation of the subtitles file was completed.'))
 
@@ -196,18 +203,19 @@ def convert_item(
     translator = get_translator()
     translator.set_source_lang(source_lang)
     translator.set_target_lang(target_lang)
+    if format == 'srt' and translator.merge_enabled:
+        translator.set_prompt_extension(
+            srt_prompt_extension(translator.placeholder))
 
     element_handler = get_element_handler(
-        translator.placeholder, translator.separator, direction)
+        translator.placeholder, translator.separator, direction, format)
     element_handler.set_translation_lang(
         translator.get_iso639_target_code(target_lang))
 
     merge_length = str(element_handler.get_merge_length())
-    _encoding = ''
-    if encoding.lower() != 'utf-8':
-        _encoding = encoding.lower()
-    cache_id = uid(
-        input_path + translator.name + target_lang + merge_length + _encoding)
+    cache_id = get_cache_id(
+        input_path, translator.name, target_lang, merge_length, encoding,
+        format)
     cache = get_cache(cache_id)
     cache.set_cache_only(cache_only)
     cache.set_info('title', ebook_title)
@@ -220,6 +228,7 @@ def convert_item(
     translation = get_translation(
         translator, lambda text, error=False: log.info(text))
     translation.set_batch(is_batch)
+    translation.set_alignment(format != 'srt')
     translation.set_callback(cache.update_paragraph)
 
     debug_info = '{0}\n| Diagnosis Information\n{0}'.format(sep())

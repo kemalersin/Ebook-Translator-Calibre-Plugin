@@ -3,7 +3,8 @@ from unittest.mock import patch, Mock, call
 
 from ...lib.utils import dummy
 from ...lib.translation import Glossary, ProgressBar, Translation
-from ...lib.exception import TranslationCanceled, TranslationFailed
+from ...lib.exception import (
+    TranslationCanceled, TranslationFailed, RequestRejected)
 from ...engines.base import Base
 from ...engines.deepl import DeeplTranslate
 
@@ -217,6 +218,23 @@ class TestTranslation(unittest.TestCase):
         mock_time.sleep.assert_has_calls([
             call(5), call(10), call(15), call(20), call(25)])
         self.assertEqual(6, self.translation.abort_count)
+
+    @patch.object(Translation, 'need_stop', lambda self: False)
+    @patch(f'{module_name}.time')
+    def test_translate_text_rejected_request(self, mock_time):
+        self.translation.translator.translate.side_effect = RequestRejected(
+            'HTTP Error 400: Bad Request')
+        self.translation.log = self.log
+        self.translation.cancel_request = self.cancel_request
+        self.translator.request_attempt = 5
+
+        with self.assertRaises(TranslationFailed):
+            self.translation.translate_text(0, 'text')
+
+        self.translator.translate.assert_called_once_with('text')
+        self.log.assert_not_called()
+        mock_time.sleep.assert_not_called()
+        self.assertEqual(1, self.translation.abort_count)
 
     def test_translate_cancel_due_to_fatal_error(self):
         pass

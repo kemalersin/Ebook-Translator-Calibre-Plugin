@@ -8,7 +8,7 @@ from mechanize import HTTPError
 from calibre.utils.localization import _, lang_as_iso639_1  # type: ignore
 
 from ..lib.utils import log, traceback_error, request, socks_proxy
-from ..lib.exception import UnexpectedResult
+from ..lib.exception import UnexpectedResult, RequestRejected
 
 from .languages import lang_directionality
 
@@ -32,6 +32,8 @@ class Base:
     api_key_hint = _('API Keys')
     api_key_pattern = r'^[^\s]+$'
     api_key_errors = ['401']
+    # Regular expressions matching errors that retrying cannot fix.
+    rejected_errors: list[str] = []
     separator = '\n\n'
     support_html = False
     placeholder = ('{{{{id_{}}}}}', r'({{\s*)+id\s*_\s*{}\s*(\s*}})+')
@@ -53,6 +55,7 @@ class Base:
         self.proxy_port: int | None = None
 
         self.merge_enabled = False
+        self.prompt_extension: str | None = None
         self.api_keys: list = self.config.get('api_keys', [])[:]
         self.bad_api_keys = []
         self.api_key = self.get_api_key()
@@ -137,6 +140,11 @@ class Base:
                 return True
         return False
 
+    def is_rejected(self, error_message):
+        return any(
+            re.search(pattern, error_message)
+            for pattern in self.rejected_errors)
+
     def set_search_paths(self, paths):
         self.search_paths = paths
 
@@ -150,6 +158,10 @@ class Base:
 
     def set_merge_enabled(self, enable):
         self.merge_enabled = enable
+
+    def set_prompt_extension(self, extension: str | None) -> None:
+        """Extra instructions for engines that take a prompt (GenAI)."""
+        self.prompt_extension = extension
 
     def set_source_lang(self, source_lang: str) -> None:
         self.source_lang = source_lang
@@ -226,7 +238,9 @@ class Base:
             # Swap a valid API key if necessary.
             if self.need_swap_api_key(error_message) and self.swap_api_key():
                 return self.translate(content)
-            raise UnexpectedResult(
+            error_class = RequestRejected \
+                if self.is_rejected(error_message) else UnexpectedResult
+            raise error_class(
                 _('Can not parse returned response. Raw data: {}')
                 .format('\n\n' + error_message))
 

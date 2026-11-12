@@ -123,7 +123,8 @@ class AdvancedTranslationTable(QTableWidget):
         Qt.NoBrush results in a fully black background.
         """
         engine = get_engine_class(paragraph.engine_name)
-        if engine is None or paragraph.is_alignment(engine.separator):
+        if engine is None or paragraph.is_alignment(
+                engine.separator, engine.placeholder):
             (vh_bg, vh_fg, bg), tip = self._normal_row_background_color(), ''
             paragraph.aligned = True
         else:

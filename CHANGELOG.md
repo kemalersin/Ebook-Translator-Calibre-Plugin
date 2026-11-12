@@ -1,3 +1,15 @@
+## v2.4.3
+
+1. fix: SRT subtitles are split by timing lines and every cue is translated under its own timestamp. Merged requests carry numbered cue markers, so translations no longer pile up under one cue.
+2. fix: SRT groups whose markers do not survive the translation are re-translated cue by cue.
+3. fix: Blank lines, timing lines and leftover markers are removed from SRT translations; inline tags such as `<i>` and `{\an8}` are preserved.
+4. fix: Google(Free)New splits requests that exceed the URL limit instead of failing with HTTP 400, and re-translates paragraphs when the service merges, drops or repeats them.
+5. fix: Requests rejected with a permanent error are no longer retried.
+6. change: SRT cache ids carry a version suffix (`srt-v2`); earlier SRT caches are not reused.
+7. docs: Add `docs/ARCHITECTURE.md`, `docs/SRT_ANALYSIS.md` and `docs/GOOGLE_FREE_NEW.md`.
+
+---
+
 ## v2.4.2
 
 1. feat: Move cache path from temp to a persistent folder. Credit to @Sansui233.

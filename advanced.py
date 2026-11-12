@@ -12,10 +12,11 @@ from calibre.gui2 import I  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 
 from . import EbookTranslator
-from .lib.utils import uid, traceback_error
+from .lib.utils import traceback_error
 from .lib.config import get_config
 from .lib.encodings import encoding_list
-from .lib.cache import Paragraph, get_cache
+from .lib.cache import Paragraph, get_cache, get_cache_id
+from .lib.srt import srt_prompt_extension, repair_srt_groups
 from .lib.translation import get_engine_class, get_translator, get_translation
 from .lib.element import get_element_handler
 from .lib.conversion import extract_item, extra_formats
@@ -89,14 +90,11 @@ class PreparationWorker(QObject):
         input_path = self.ebook.get_input_path()
         element_handler = get_element_handler(
             self.engine_class.placeholder, self.engine_class.separator,
-            self.ebook.target_direction)
+            self.ebook.target_direction, self.ebook.input_format)
         merge_length = str(element_handler.get_merge_length())
-        encoding = ''
-        if self.ebook.encoding.lower() != 'utf-8':
-            encoding = self.ebook.encoding.lower()
-        cache_id = uid(
-            input_path + self.engine_class.name + self.ebook.target_lang
-            + merge_length + encoding)
+        cache_id = get_cache_id(
+            input_path, self.engine_class.name, self.ebook.target_lang,
+            merge_length, self.ebook.encoding, self.ebook.input_format)
         cache = get_cache(cache_id)
 
         if cache.is_fresh() or not cache.is_persistence():
@@ -173,6 +171,7 @@ class TranslationWorker(QObject):
         QObject.__init__(self)
         self.source_lang = ebook.source_lang
         self.target_lang = ebook.target_lang
+        self.input_format = ebook.input_format
         self.engine_class = engine_class
 
         self.on_working = False
@@ -207,14 +206,23 @@ class TranslationWorker(QObject):
         translator = get_translator(self.engine_class)
         translator.set_source_lang(self.source_lang)
         translator.set_target_lang(self.target_lang)
+        is_srt = self.input_format == 'srt'
+        if is_srt and translator.merge_enabled:
+            translator.set_prompt_extension(
+                srt_prompt_extension(translator.placeholder))
         translation = get_translation(translator)
         translation.set_fresh(fresh)
+        translation.set_alignment(not is_srt)
         translation.set_logging(
             lambda text, error=False: self.logging.emit(text, error))
         translation.set_streaming(self.streaming.emit)
         translation.set_callback(self.callback.emit)
         translation.set_cancel_request(self.cancel_request)
         translation.handle(paragraphs)
+        if is_srt:
+            repair_srt_groups(
+                translation, paragraphs, translator.placeholder,
+                self.callback.emit)
         self.on_working = False
         self.finished.emit()
         if self.need_close:

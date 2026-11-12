@@ -102,27 +102,63 @@ class Element:
         return None
 
 
+SRT_TIMING_RE = re.compile(
+    r'^\s*(\d{1,2}:\d{1,2}:\d{1,2}(?:[,.]\d{1,3})?)\s*-->\s*'
+    r'(\d{1,2}:\d{1,2}:\d{1,2}(?:[,.]\d{1,3})?)(.*)$')
+SRT_TAG_RE = re.compile(r'<[^<>\n]+>|\{\\[^{}\n]*\}')
+SRT_CUE_MARKER_ID = r'c\s*\d+'
+
+
 class SrtElement(Element):
     def get_raw(self):
         return self.element[2]
 
     def get_text(self):
-        return self.get_raw()
+        return SRT_TAG_RE.sub('', self.get_raw())
 
     def get_content(self):
-        return self.get_text()
+        self.reserve_elements = []
+        if not self.placeholder:
+            return self.get_raw()
+
+        def reserve(match):
+            self.reserve_elements.append(match.group(0))
+            return self.placeholder[0].format(
+                format(len(self.reserve_elements) - 1, '05'))
+        return SRT_TAG_RE.sub(reserve, self.get_raw())
+
+    def _clean_translation(self, translation):
+        translation = translation.replace('\r\n', '\n').replace('\r', '\n')
+        if self.placeholder:
+            for rid, tag in enumerate(self.reserve_elements):
+                pattern = self.placeholder[1].format(
+                    r'\s*'.join(format(rid, '05')))
+                translation = re.sub(pattern, lambda _: tag, translation)
+            leftover = re.compile('%s|%s' % (
+                self.placeholder[1].format(r'\d{5}'),
+                self.placeholder[1].format(SRT_CUE_MARKER_ID)))
+            translation = leftover.sub('', translation)
+        # A blank line ends a cue and a timing line starts one, so neither may
+        # survive inside the text of a cue.
+        lines = [line.rstrip() for line in translation.split('\n')
+                 if line.strip() and not SRT_TIMING_RE.match(line)]
+        return '\n'.join(lines).strip()
 
     def add_translation(self, translation=None):
-        if translation is not None:
-            if self.position == 'only':
-                self.element[2] = translation
-            elif self.position in ('below', 'right'):
-                self.element[2] += '\n%s' % translation
-            else:
-                self.element[2] = '%s\n%s' % (translation, self.element[2])
+        if translation is None:
+            return
+        translation = self._clean_translation(translation)
+        if translation == '':
+            return
+        if self.position == 'only' or not self.element[2]:
+            self.element[2] = translation
+        elif self.position in ('below', 'right'):
+            self.element[2] += '\n%s' % translation
+        else:
+            self.element[2] = '%s\n%s' % (translation, self.element[2])
 
     def get_translation(self):
-        return '\n'.join(self.element)
+        return '\n'.join(part for part in self.element if part)
 
 
 class PgnElement(Element):
@@ -293,12 +329,19 @@ class PageElement(Element):
 
         # Escape the markups (<m id=1 />) to replace escaped markups.
         translation = xml_escape(translation)
+        missing = []
         for rid, element in enumerate(self.reserve_elements):
             pattern = self.placeholder[1].format(
                 r'\s*'.join(format(rid, '05')))
             # Prevent processe any backslash escapes in the replacement.
-            translation = re.sub(
+            translation, count = re.subn(
                 xml_escape(pattern), lambda _: element, translation)
+            if count == 0:
+                missing.append(element)
+        # Keep reserved elements (images, footnote links, line breaks) that
+        # the engine dropped instead of losing them silently.
+        if missing:
+            translation += ''.join(missing)
         translation = self._polish_translation(translation)
 
         element_name = get_name(self.element)
@@ -820,15 +863,8 @@ class ElementHandlerMerge(ElementHandler):
 
 
 def get_srt_elements(path, encoding):
-    elements = []
-    content = open_file(path, encoding)
-    for section in content.strip().split('\n\n'):
-        lines = section.split('\n')
-        number = lines.pop(0)
-        time = lines.pop(0)
-        content = '\n'.join(lines)
-        elements.append(SrtElement([number, time, content]))
-    return elements
+    from .srt import get_srt_elements as _get_srt_elements
+    return _get_srt_elements(path, encoding)
 
 
 def get_pgn_elements(path, encoding):
@@ -880,7 +916,10 @@ def get_page_elements(pages):
     return extraction.get_elements()
 
 
-def get_element_handler(placeholder, separator, direction):
+def get_element_handler(placeholder, separator, direction, input_format=None):
+    if input_format == 'srt':
+        from .srt import get_srt_element_handler
+        return get_srt_element_handler(placeholder, separator, direction)
     config = get_config()
     position_alias = {'before': 'above', 'after': 'below'}
     position = config.get('translation_position') or 'below'

@@ -12,7 +12,8 @@ from ..engines.custom import CustomTranslate
 
 from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
-from .exception import TranslationFailed, TranslationCanceled
+from .exception import (
+    TranslationFailed, TranslationCanceled, RequestRejected)
 from .handler import Handler
 
 
@@ -81,6 +82,7 @@ class Translation:
 
         self.fresh = False
         self.batch = False
+        self.alignment = True
         self.progress = dummy
         self.log = dummy
         self.streaming = dummy
@@ -96,6 +98,21 @@ class Translation:
 
     def set_batch(self, batch):
         self.batch = batch
+
+    def set_alignment(self, alignment):
+        self.alignment = alignment
+
+    def fork(self):
+        """Create a translation that shares the engine, glossary, logging and
+        cancellation, but neither reports progress, streams nor writes to the
+        cache.
+        """
+        translation = Translation(self.translator, self.glossary)
+        translation.set_batch(self.batch)
+        translation.set_alignment(self.alignment)
+        translation.set_logging(self.log)
+        translation.set_cancel_request(self.cancel_request)
+        return translation
 
     def set_progress(self, progress):
         self.progress = progress
@@ -136,7 +153,8 @@ class Translation:
                 raise TranslationCanceled(_('Translation canceled.'))
             self.abort_count += 1
             message = _('Failed to retrieve data from translate engine API.')
-            if retry >= self.translator.request_attempt:
+            if retry >= self.translator.request_attempt \
+                    or isinstance(e, RequestRejected):
                 raise TranslationFailed('{}\n{}'.format(message, str(e)))
             retry += 1
             interval += 5
@@ -183,7 +201,7 @@ class Translation:
         translation = self.glossary.restore(translation)
         paragraph.translation = translation.strip()
         # Apply aligment checking and processing.
-        if self.translator.merge_enabled:
+        if self.alignment and self.translator.merge_enabled:
             paragraph.do_aligment(self.translator.separator)
         paragraph.engine_name = self.translator.name
         paragraph.target_lang = self.translator.get_target_lang()

@@ -13,13 +13,14 @@ from mechanize._response import (  # type: ignore
 
 from ...lib.cache import Paragraph
 from ...engines.base import Base
-from ...lib.exception import UnexpectedResult, UnsupportedModel
+from ...lib.exception import (
+    UnexpectedResult, UnsupportedModel, RequestRejected)
 from ...engines.genai import GenAI
 from ...engines.deepl import DeeplTranslate
 from ...engines.openai import ChatgptTranslate, ChatgptBatchTranslate
 from ...engines.microsoft import AzureChatgptTranslate
 from ...engines.anthropic import ClaudeTranslate
-from ...engines.google import GeminiTranslate
+from ...engines.google import GeminiTranslate, GoogleFreeTranslateNew
 from ...engines.custom import (
     create_engine_template, load_engine_data, CustomTranslate)
 
@@ -428,6 +429,133 @@ class TestDeepl(unittest.TestCase):
             re.S)
         with self.assertRaisesRegex(Exception, error):
             self.translator.translate('Hello World!')
+
+
+class TestGoogleFreeTranslateNew(unittest.TestCase):
+    def setUp(self):
+        GoogleFreeTranslateNew.set_config({})
+        self.translator = GoogleFreeTranslateNew()
+        self.translator.set_source_lang('English')
+        self.translator.set_target_lang('Turkish')
+
+    def limit(self, size):
+        """Leave room for `size` bytes of encoded text in the URL."""
+        self.translator.max_url_length = \
+            self.translator.get_url_length('') + size
+
+    def assertChunks(self, text, size):
+        self.limit(size)
+        chunks = self.translator.split_text(text)
+        self.assertEqual(text, ''.join(c + d for c, d in chunks))
+        for chunk, _ in chunks:
+            self.assertLessEqual(
+                self.translator.get_url_length(chunk),
+                self.translator.max_url_length)
+        return chunks
+
+    def test_get_body(self):
+        body = self.translator.get_body('Hello')
+        self.assertEqual('GET', self.translator.method)
+        self.assertEqual('en', body['query.source_language'])
+        self.assertEqual('tr', body['query.target_language'])
+        self.assertEqual('Hello', body['query.text'])
+
+    def test_get_headers(self):
+        headers = self.translator.get_headers()
+        self.assertEqual('identity', headers['Accept-Encoding'])
+        self.assertNotIn('Content-Type', headers)
+
+    def test_split_text_short(self):
+        self.assertEqual(
+            [('Hello world.', '')], self.translator.split_text('Hello world.'))
+
+    def test_split_text_paragraphs(self):
+        text = 'aaaa bbbb.\n\ncccc dddd.\n\neeee ffff.'
+        chunks = self.assertChunks(text, 26)
+        self.assertEqual(
+            [('aaaa bbbb.\n\ncccc dddd.', '\n\n'), ('eeee ffff.', '')], chunks)
+
+    def test_split_text_sentences(self):
+        text = 'One two three. Four five six! Seven eight nine?'
+        chunks = self.assertChunks(text, 20)
+        self.assertEqual(
+            ['One two three.', 'Four five six!', 'Seven eight nine?'],
+            [chunk for chunk, _ in chunks])
+
+    def test_split_text_cjk(self):
+        # Each CJK character takes 9 bytes once percent-encoded.
+        text = '今日は晴れです。明日は雨です。'
+        chunks = self.assertChunks(text, 72)
+        self.assertEqual(
+            ['今日は晴れです。', '明日は雨です。'],
+            [chunk for chunk, _ in chunks])
+
+    def test_split_text_words(self):
+        self.assertChunks('alpha beta gamma delta epsilon zeta eta', 12)
+
+    def test_split_text_keeps_placeholders(self):
+        text = 'a' * 10 + '{{id_00000}}' + 'b' * 10
+        chunks = self.assertChunks(text, 30)
+        self.assertEqual(
+            ['a' * 10 + '{{id_00000}}', 'b' * 10],
+            [chunk for chunk, _ in chunks])
+
+    @patch(module_name + '.base.request')
+    def test_translate(self, mock_request):
+        mock_request.return_value = '{"translation": "Merhaba"}'
+        self.assertEqual('Merhaba', self.translator.translate('Hello'))
+        mock_request.assert_called_once()
+        self.assertEqual('GET', mock_request.call_args.kwargs['method'])
+
+    @patch(module_name + '.base.request')
+    def test_translate_long_text(self, mock_request):
+        def request(**kwargs):
+            text = kwargs['data']['query.text']
+            return json.dumps({'translation': text.upper()})
+        mock_request.side_effect = request
+        self.limit(26)
+        text = 'aaaa bbbb.\n\ncccc dddd.\n\neeee ffff.'
+        self.assertEqual(
+            'AAAA BBBB.\n\nCCCC DDDD.\n\nEEEE FFFF.',
+            self.translator.translate(text))
+        self.assertEqual(2, mock_request.call_count)
+
+    @patch(module_name + '.base.request')
+    def test_translate_merged_paragraphs(self, mock_request):
+        responses = {
+            'One.\n\nTwo.\n\nThree.': 'Bir. İki.\n\nÜç.',
+            'One.': 'Bir.', 'Two.': 'İki.', 'Three.': 'Üç.'}
+        mock_request.side_effect = lambda **kwargs: json.dumps({
+            'translation': responses[kwargs['data']['query.text'].strip()]})
+        content = 'One.\n\nTwo.\n\nThree.\n\n'
+
+        self.assertEqual('Bir. İki.\n\nÜç.', self.translator.translate(content))
+        self.assertEqual(1, mock_request.call_count)
+
+        mock_request.reset_mock()
+        self.translator.set_merge_enabled(True)
+        self.assertEqual(
+            'Bir.\n\nİki.\n\nÜç.', self.translator.translate(content))
+        self.assertEqual(4, mock_request.call_count)
+
+        mock_request.reset_mock()
+        responses['One.\n\nTwo.\n\nThree.'] = 'Bir.\n\n\n\nİki.\n\nÜç.'
+        self.assertEqual(
+            'Bir.\n\n\n\nİki.\n\nÜç.', self.translator.translate(content))
+        self.assertEqual(1, mock_request.call_count)
+
+    @patch(module_name + '.base.request')
+    def test_translate_rejected(self, mock_request):
+        mock_request.side_effect = Exception(
+            'httperror_seek_wrapper: HTTP Error 400: Bad Request')
+        with self.assertRaises(RequestRejected):
+            self.translator.translate('Hello')
+
+        mock_request.side_effect = Exception(
+            'httperror_seek_wrapper: HTTP Error 429: Too Many Requests')
+        with self.assertRaises(UnexpectedResult) as cm:
+            self.translator.translate('Hello')
+        self.assertNotIsInstance(cm.exception, RequestRejected)
 
 
 class TestChatgptTranslate(unittest.TestCase):

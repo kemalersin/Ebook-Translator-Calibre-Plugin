@@ -93,6 +93,8 @@ class ClaudeTranslate(GenAI):
         if self.merge_enabled:
             prompt += (' Ensure that placeholders matching the pattern '
                        '{{id_\\d+}} in the content are retained.')
+        if self.prompt_extension:
+            prompt += ' ' + self.prompt_extension
         return prompt
 
     def get_models(self):
