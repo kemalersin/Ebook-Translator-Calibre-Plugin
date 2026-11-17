@@ -500,6 +500,13 @@ class TestGoogleFreeTranslateNew(unittest.TestCase):
             ['a' * 10 + '{{id_00000}}', 'b' * 10],
             [chunk for chunk, _ in chunks])
 
+    def test_split_text_keeps_style_markers(self):
+        text = 'a' * 8 + '⟦12⟧' + 'b' * 8
+        chunks = self.assertChunks(text, 20)
+        self.assertTrue(any('⟦12⟧' in chunk for chunk, _delimiter in chunks))
+        self.assertTrue(all(
+            chunk.count('⟦') == chunk.count('⟧') for chunk, _delimiter in chunks))
+
     @patch(module_name + '.base.request')
     def test_translate(self, mock_request):
         mock_request.return_value = '{"translation": "Merhaba"}'

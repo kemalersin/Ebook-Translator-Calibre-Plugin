@@ -20,7 +20,8 @@ from ...lib.pdf import (
     chain_paragraphs, split_translation, find_wheel, install_pymupdf,
     get_installed_version, load_pymupdf, is_pdf_layout, PdfElement,
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
-    mark_lines, LIST_ITEM)
+    mark_lines, LIST_ITEM, render_markup, font_variants,
+    pdf_prompt_extension)
 from ...engines.base import Base
 
 
@@ -85,6 +86,98 @@ class TestJoinText(unittest.TestCase):
     def test_empty(self):
         self.assertEqual('a', join_text('', 'a'))
         self.assertEqual('a', join_text('a', ''))
+
+
+class TestMarkers(unittest.TestCase):
+    def paragraph(self, spans, links=()):
+        return make_paragraph(0, [{
+            'dir': (1, 0), 'bbox': (40, 80, 300, 100),
+            'baseline': 96, 'text': ''.join(item['text'] for item in spans),
+            'item': False, 'spans': spans}], links)
+
+    def test_plain_paragraph_has_no_marker(self):
+        made = self.paragraph([span('Please share our books.')])
+        self.assertEqual('Please share our books.', made['text'])
+        self.assertEqual({}, made['runs'])
+
+    def test_colored_bold_words(self):
+        made = self.paragraph([
+            span('Please share these '),
+            span('books', color=0x008000, flags=20, font='Times-Bold'),
+            span(' with your friends now.')])
+        self.assertEqual(
+            'Please share these ⟦1⟧ books ⟦/1⟧ with your friends now.',
+            made['text'])
+        self.assertEqual('#008000', made['runs'][1]['color'])
+        self.assertTrue(made['runs'][1]['bold'])
+        self.assertFalse(made['runs'][1]['italic'])
+
+    def test_link_on_its_own_words(self):
+        linked = span('share', color=0x008000, flags=4)
+        linked['bbox'] = (80, 84, 120, 98)
+        plain = span('Please ')
+        plain['bbox'] = (40, 84, 80, 98)
+        made = self.paragraph([plain, linked], links=[{
+            'from': [80, 84, 120, 98], 'uri': 'https://example.com/'}])
+        self.assertEqual('https://example.com/', made['runs'][1]['uri'])
+        self.assertIn('⟦1⟧ share ⟦/1⟧', made['text'])
+
+    def test_small_link_does_not_mark_the_line(self):
+        whole = span('Squire Trelawney asked me to write')
+        whole['bbox'] = (40, 80, 300, 94)
+        made = self.paragraph([whole], links=[{
+            'from': [40, 80, 90, 94], 'uri': 'https://example.com/'}])
+        self.assertEqual({}, made['runs'])
+
+    def test_render_markup(self):
+        markup = render_markup(
+            'Please ⟦1⟧ share our books ⟦/1⟧ now.',
+            {1: {'color': '#008000', 'bold': True, 'italic': False,
+                 'uri': 'https://example.com/a&b'}})
+        self.assertNotIn('⟦', markup)
+        self.assertIn('>share our books<', markup)
+        self.assertIn('color:#008000', markup)
+        self.assertIn('font-weight:bold', markup)
+        self.assertNotIn('<a', markup)
+        self.assertTrue(markup.startswith('Please <span '))
+        self.assertTrue(markup.endswith('</span> now.'))
+
+    def test_render_drops_unknown_markers(self):
+        self.assertEqual(
+            'Please share.', render_markup('Please ⟦9⟧ share ⟦/9⟧.', {}))
+
+    def test_render_run_split_across_parts(self):
+        run = {1: {'color': '#008000', 'bold': False, 'italic': True}}
+        self.assertIn('>share<', render_markup('⟦1⟧ share', run))
+        self.assertIn('>our books<', render_markup('our books ⟦/1⟧', run))
+
+    def test_join_across_markers(self):
+        self.assertEqual('cap⟦/1⟧⟦2⟧stan', join_text('cap-⟦/1⟧', '⟦2⟧stan'))
+        self.assertEqual('a⟦/1⟧ ⟦2⟧b', join_text('a⟦/1⟧', '⟦2⟧b'))
+
+    def test_split_does_not_cut_a_marker(self):
+        pieces = split_translation('alpha ⟦ 1 ⟧ beta gamma delta', [1, 1])
+        self.assertTrue(all(
+            '⟦' not in piece or '⟧' in piece for piece in pieces))
+
+    def test_markers_do_not_hide_sentence_end(self):
+        self.assertFalse(is_continuation(
+            paragraph('It ended.⟦/1⟧'), paragraph('⟦2⟧ next', page=1)))
+        self.assertTrue(is_continuation(
+            paragraph('and then⟦/1⟧'), paragraph('⟦2⟧he left.', page=1)))
+
+    def test_font_variants(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        for name in ('arial.ttf', 'arialbd.ttf', 'ariali.ttf', 'arialbi.ttf'):
+            open(os.path.join(folder, name), 'w').close()
+        faces = font_variants(os.path.join(folder, 'arial.ttf'))
+        self.assertEqual('arialbd.ttf', faces['bold'])
+        self.assertEqual('ariali.ttf', faces['italic'])
+        self.assertEqual('arialbi.ttf', faces['both'])
+
+    def test_prompt_names_the_marker(self):
+        self.assertIn('⟦1⟧', pdf_prompt_extension())
 
 
 class TestGetLines(unittest.TestCase):
@@ -896,6 +989,51 @@ class TestPdfLayout(unittest.TestCase):
         fonts = [span['font'] for block in page.get_text('dict')['blocks']
                  for line in block['lines'] for span in line['spans']]
         self.assertTrue(any('Arabic' in font for font in fonts), fonts)
+
+    def test_inline_style_round_trip(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=595)
+        css = '* {font-family: Times; font-size: 14pt; color: #000000}'
+        page.insert_htmlbox(
+            pymupdf.Rect(40, 40, 380, 80),
+            '<div>Please <span style="color:#008000; font-weight:bold">'
+            'share our books</span> now.</div>', css=css, scale_low=1)
+        for block in page.get_text('dict')['blocks']:
+            for line in block.get('lines', []):
+                for item in line['spans']:
+                    if 'share' in item['text']:
+                        page.insert_link({
+                            'kind': pymupdf.LINK_URI,
+                            'from': pymupdf.Rect(item['bbox']),
+                            'uri': 'https://example.com/donate'})
+        document.save(self.source)
+        document.close()
+        elements = [item for item in get_pdf_elements(self.source)
+                    if not item.ignored]
+        text = elements[0].get_text()
+        number = next(key for key, run in elements[0].runs.items()
+                      if run.get('uri') == 'https://example.com/donate')
+        self.assertIn('⟦%d⟧ share our books ⟦/%d⟧' % (number, number), text)
+        self.assertTrue(elements[0].runs[number]['bold'])
+        elements[0].add_translation(
+            text.replace('Please', 'Lütfen').replace('now', 'şimdi').replace(
+                'share our books', 'kitaplarımızı paylaşın'))
+        compose_pdf(self.source, self.output, elements, 'only')
+        with pymupdf.open(self.output) as result:
+            self.assertIn('kitaplarımızı paylaşın', result[0].get_text())
+            self.assertNotIn('⟦', result[0].get_text())
+            colored = [
+                item for block in result[0].get_text('dict')['blocks']
+                for line in block.get('lines', [])
+                for item in line['spans'] if 'kitap' in item['text']]
+            self.assertEqual(0x008000, colored[0]['color'])
+            self.assertTrue(colored[0]['flags'] & 16)
+            links = result[0].get_links()
+            self.assertEqual(
+                ['https://example.com/donate'], [link.get('uri') for link in links])
+            link_box = links[0]['from']
+            self.assertLess(link_box.x0, colored[0]['bbox'][2])
+            self.assertGreater(link_box.x1, colored[0]['bbox'][0])
 
     def test_write_part_color(self):
         scale, page = self.write('Renkli', translation_color='#ff0000')

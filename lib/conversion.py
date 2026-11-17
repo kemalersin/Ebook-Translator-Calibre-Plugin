@@ -25,7 +25,8 @@ from .element import (
     get_metadata_elements, get_pgn_elements)
 from .srt import (
     get_srt_elements, compose_srt, repair_srt_groups, srt_prompt_extension)
-from .pdf import is_pdf_layout, get_pdf_elements, compose_pdf
+from .pdf import (
+    is_pdf_layout, get_pdf_elements, compose_pdf, pdf_prompt_extension)
 from .translation import get_translator, get_translation
 from .exception import ConversionAbort
 
@@ -246,10 +247,6 @@ def convert_item(
     translator = get_translator()
     translator.set_source_lang(source_lang)
     translator.set_target_lang(target_lang)
-    if format == 'srt' and translator.merge_enabled:
-        translator.set_prompt_extension(
-            srt_prompt_extension(translator.placeholder))
-
     element_handler = get_element_handler(
         translator.placeholder, translator.separator, direction, format)
     element_handler.set_translation_lang(
@@ -261,6 +258,11 @@ def convert_item(
     # setting is off. The cache has to follow that choice.
     layout = is_pdf_layout(format, output_format) or (
         format == 'pdf' and output_format == 'pdf' and bool(font_path))
+    if format == 'srt' and translator.merge_enabled:
+        translator.set_prompt_extension(
+            srt_prompt_extension(translator.placeholder))
+    elif layout:
+        translator.set_prompt_extension(pdf_prompt_extension())
     cache_id = get_cache_id(
         input_path, translator.name, target_lang, merge_length, encoding,
         format, output_format, layout)

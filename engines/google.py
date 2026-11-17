@@ -31,7 +31,8 @@ class GoogleFreeTranslateNew(Base):
     max_url_length = 14000
     split_patterns = (
         r'\n{2,}', r'\n', r'(?<=[.!?;:。！？；])\s+|(?<=[。！？；])', r'\s+')
-    atom_pattern = re.compile(r'\{\{\s*id\s*_\s*\w+\s*\}\}|.', re.S)
+    atom_pattern = re.compile(
+        r'\{\{\s*id\s*_\s*\w+\s*\}\}|⟦\s*/?\s*\d+\s*⟧|.', re.S)
 
     def get_headers(self):
         return {

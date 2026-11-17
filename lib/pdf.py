@@ -235,15 +235,40 @@ def install_pymupdf(progress=None, wheel_path=None):
     return library_dir
 
 
+# Inline formatting travels through the translation inside these markers.
+# They contain no words, so an engine has nothing to translate, and spaces
+# around them keep the words themselves out of the marker.
+MARKER = re.compile(r'⟦\s*(/)?\s*(\d+)\s*⟧')
+
+
+def plain_text(text):
+    """The text a reader sees: the same string without inline markers."""
+    return MARKER.sub('', text)
+
+
+def _drop_last_visible(text):
+    """Drop the last character that is not part of a trailing marker."""
+    match = re.search(r'(?:⟦\s*/?\s*\d+\s*⟧\s*)*$', text)
+    suffix = match.group(0)
+    body = text[:-len(suffix)] if suffix else text
+    return body[:-1] + suffix
+
+
 def join_text(head, tail):
     """Join two lines of a paragraph, undoing hyphenation at the line end."""
     if head == '' or tail == '':
         return head or tail
-    if head.endswith('\xad'):
-        return head[:-1] + tail
-    if head.endswith('-') and len(head) > 1 and head[-2].isalpha():
-        return head[:-1] + tail if tail[0].islower() else head + tail
-    if CJK.match(head[-1]) and CJK.match(tail[0]):
+    plain_head, plain_tail = plain_text(head), plain_text(tail)
+    if plain_head == '' or plain_tail == '':
+        return head + tail
+    if plain_head.endswith('\xad'):
+        return _drop_last_visible(head) + tail
+    if plain_head.endswith('-') and len(plain_head) > 1 \
+            and plain_head[-2].isalpha():
+        if plain_tail[0].islower():
+            return _drop_last_visible(head) + tail
+        return head + tail
+    if CJK.match(plain_head[-1]) and CJK.match(plain_tail[0]):
         return head + tail
     return head + ' ' + tail
 
@@ -457,14 +482,163 @@ def get_alignment(lines, size):
     return 'left'
 
 
-def make_paragraph(page, lines):
+def snapshot_links(page):
+    """Copy the links that can be attached to text, as plain data."""
+    links = []
+    for link in page.get_links():
+        item = {'from': [float(value) for value in link['from']]}
+        if link.get('uri'):
+            item['uri'] = link['uri']
+        elif link.get('page') is not None:
+            item['page'] = link['page']
+            if link.get('to') is not None:
+                item['to'] = [float(value) for value in link['to']]
+        else:
+            continue
+        links.append(item)
+    return links
+
+
+def _span_bold(span):
+    return bool(span['flags'] & FLAG_BOLD) \
+        or bool(BOLD_FONTS.search(span['font']))
+
+
+def _span_italic(span):
+    return bool(span['flags'] & FLAG_ITALIC) \
+        or bool(ITALIC_FONTS.search(span['font']))
+
+
+def _covering_link(span, links):
+    """The link that covers this span, when the span is the linked text.
+
+    A link rectangle drawn over a long line covers only part of it. That
+    line stays plain text and the link is put back where it was.
+    """
+    box = span.get('bbox')
+    if not box or not links:
+        return None
+    width = box[2] - box[0]
+    if width <= 0:
+        return None
+    best, best_width = None, 0
+    for link in links:
+        rect = link['from']
+        overlap_x = min(box[2], rect[2]) - max(box[0], rect[0])
+        overlap_y = min(box[3], rect[3]) - max(box[1], rect[1])
+        if overlap_x > best_width and overlap_y > 0:
+            best, best_width = link, overlap_x
+    if best is not None and best_width >= 0.6 * width:
+        return best
+    return None
+
+
+def _span_key(span, links):
+    link = _covering_link(span, links)
+    link_id = None if link is None else links.index(link)
+    return ('#%06x' % span['color'], _span_bold(span), _span_italic(span),
+            link_id)
+
+
+def _run_record(key, links):
+    color, bold, italic, link_id = key
+    record = {'color': color, 'bold': bold, 'italic': italic}
+    if link_id is None:
+        return record
+    link = links[link_id]
+    record['from'] = link['from']
+    if link.get('uri'):
+        record['uri'] = link['uri']
+    else:
+        record['page'] = link.get('page')
+        if link.get('to'):
+            record['to'] = link['to']
+    return record
+
+
+def _pieces_of_line(line, links):
+    pieces = []
+    for span in line['spans']:
+        if span['text'] == '':
+            continue
+        key = _span_key(span, links)
+        if pieces and pieces[-1]['key'] == key:
+            pieces[-1]['text'] += span['text']
+        else:
+            pieces.append({'key': key, 'text': span['text']})
+    if not pieces:
+        return []
+    pieces[0]['text'] = pieces[0]['text'].lstrip()
+    pieces[-1]['text'] = pieces[-1]['text'].rstrip()
+    return [piece for piece in pieces if piece['text']]
+
+
+def _extend_pieces(pieces, more):
+    """Append the next line, joining a hyphenated word across the boundary."""
+    if not pieces:
+        return more
+    if not more:
+        return pieces
+    head, tail = pieces[-1], more[0]
+    if head['text'].endswith('\xad'):
+        head['text'] = head['text'][:-1]
+        separator = ''
+    elif head['text'].endswith('-') and len(head['text']) > 1 \
+            and head['text'][-2].isalpha():
+        if tail['text'][:1].islower():
+            head['text'] = head['text'][:-1]
+        separator = ''
+    elif CJK.match(head['text'][-1]) and CJK.match(tail['text'][0]):
+        separator = ''
+    else:
+        separator = ' '
+    if separator == '' and head['key'] == tail['key']:
+        head['text'] += tail['text']
+        return pieces + more[1:]
+    if separator == ' ' and head['key'] == tail['key']:
+        head['text'] += ' ' + tail['text']
+        return pieces + more[1:]
+    if separator == ' ':
+        pieces = pieces + [{'key': None, 'text': ' '}]
+    return pieces + more
+
+
+def mark_paragraph(lines, style, links, ids):
+    """Wrap the runs that differ from the paragraph's own style.
+
+    The markers are ``⟦1⟧ words ⟦/1⟧``. The spaces inside the markers keep
+    the words detachable; they are removed again when the translation is
+    written. ``ids`` is a one-item list used as a counter, so a marker means
+    the same run everywhere in the file.
+    """
+    pieces = []
+    for line in lines:
+        pieces = _extend_pieces(pieces, _pieces_of_line(line, links))
+    base = (style['color'], style['bold'], style['italic'], None)
+    runs, parts = {}, []
+    for piece in pieces:
+        text, key = piece['text'], piece['key']
+        if key in (None, base) or text.strip() == '':
+            parts.append(text)
+            continue
+        lead = text[:len(text) - len(text.lstrip())]
+        trail = text[len(text.rstrip()):]
+        number = ids[0]
+        ids[0] += 1
+        runs[number] = _run_record(key, links)
+        parts.append('%s⟦%d⟧ %s ⟦/%d⟧%s' % (
+            lead, number, text.strip(), number, trail))
+    return ''.join(parts), runs
+
+
+def make_paragraph(page, lines, links=(), ids=None):
     spans = [span for line in lines for span in line['spans']]
     style = get_style(spans)
     size = style['size']
     left = min(line['bbox'][0] for line in lines)
-    text = ''
-    for line in lines:
-        text = join_text(text, line['text'])
+    if ids is None:
+        ids = [1]
+    text, runs = mark_paragraph(lines, style, links, ids)
     line_height = 1.2
     if len(lines) > 1:
         steps = [
@@ -482,11 +656,14 @@ def make_paragraph(page, lines):
     return {
         'page': page, 'rect': rect, 'frame': list(rect),
         'lines': [line['bbox'] for line in lines], 'text': text,
-        'style': style, 'item': lines[0]['item'], 'ignored': False}
+        'style': style, 'runs': runs, 'item': lines[0]['item'],
+        'ignored': False}
 
 
-def get_page_paragraphs(page, data, rules=()):
+def get_page_paragraphs(page, data, rules=(), links=(), ids=None):
     groups, paragraphs = [], []
+    if ids is None:
+        ids = [1]
     for block in data['blocks']:
         if block.get('type') != 0:
             continue
@@ -494,12 +671,12 @@ def get_page_paragraphs(page, data, rules=()):
         if not lines:
             continue
         for index, group in enumerate(split_block(lines)):
-            paragraph = make_paragraph(page, group)
+            paragraph = make_paragraph(page, group, links, ids)
             if index == 0 and paragraphs \
                     and is_broken_off(paragraphs[-1], paragraph, rules):
                 paragraphs.pop()
                 group = groups.pop() + group
-                paragraph = make_paragraph(page, group)
+                paragraph = make_paragraph(page, group, links, ids)
             groups.append(group)
             paragraphs.append(paragraph)
     return paragraphs
@@ -562,7 +739,9 @@ def same_style(a, b):
 
 def can_continue(head, tail):
     """Whether the text of a paragraph may go on in another one."""
-    if SENTENCE_END.search(head['text']) or not tail['text'][:1].islower() \
+    head_text = plain_text(head['text']).rstrip()
+    tail_text = plain_text(tail['text']).lstrip()
+    if SENTENCE_END.search(head_text) or not tail_text[:1].islower() \
             or tail.get('item'):
         return False
     return not tail['style']['indent'] \
@@ -606,10 +785,15 @@ def chain_paragraphs(paragraphs):
 
 
 def find_cut(text, target, start):
+    """A space to cut at. Spaces inside a marker are not spaces to cut at."""
+    protected = set()
+    for match in MARKER.finditer(text):
+        protected.update(range(match.start(), match.end()))
     target = max(start, min(target, len(text)))
     for distance in range(max(target - start, len(text) - target) + 1):
         for position in (target + distance, target - distance):
-            if start < position < len(text) and text[position].isspace():
+            if start < position < len(text) and text[position].isspace() \
+                    and position not in protected:
                 return position
     return target
 
@@ -636,6 +820,10 @@ class PdfElement(Element):
     def __init__(self, parts, page_id=None, ignored=False):
         Element.__init__(self, parts, page_id, ignored)
         self.translation = None
+        self.runs = {}
+        for part in parts:
+            for number, run in (part.get('runs') or {}).items():
+                self.runs[int(number)] = run
 
     def get_raw(self):
         return self.get_text()
@@ -674,15 +862,17 @@ def get_pdf_elements(path, encoding=None):
             mark_lines(page, data, rules, marks, flags)
             obstacles = rules + [
                 list(info['bbox']) for info in page.get_image_info()]
-            pages.append((page.number, data, rules, obstacles, page.rect.y1))
+            pages.append((
+                page.number, data, rules, obstacles, page.rect.y1,
+                snapshot_links(page)))
     # Translations may grow down to the lowest text line seen in the file.
     margin = min(
         [height - max([block['bbox'][3] for block in data['blocks']
                        if block.get('type') == 0] or [0])
-         for _number, data, _rules, _obstacles, height in pages] or [0])
-    paragraphs = []
-    for number, data, rules, obstacles, height in pages:
-        page_paragraphs = get_page_paragraphs(number, data, rules)
+         for _number, data, _rules, _obstacles, height, _links in pages] or [0])
+    paragraphs, ids = [], [1]
+    for number, data, rules, obstacles, height, links in pages:
+        page_paragraphs = get_page_paragraphs(number, data, rules, links, ids)
         set_frames(page_paragraphs, obstacles, height - margin)
         paragraphs.extend(page_paragraphs)
     for paragraph in paragraphs:
@@ -700,14 +890,50 @@ def get_pdf_elements(path, encoding=None):
     return elements
 
 
+def font_variants(path):
+    """Bold and italic files that sit next to a font and share its name.
+
+    A single font file has no bold or italic face. MuPDF uses these siblings
+    when the translation asks for them: ``arial.ttf`` beside ``arialbd.ttf``.
+    """
+    folder, filename = os.path.split(path)
+    stem, ext = os.path.splitext(filename)
+    try:
+        names = {name.lower(): name for name in os.listdir(folder)}
+    except OSError:
+        names = {}
+
+    def pick(suffixes):
+        for suffix in suffixes:
+            found = names.get((stem + suffix + ext).lower())
+            if found and found.lower() != filename.lower():
+                return found
+        return None
+
+    return {
+        'regular': filename,
+        'bold': pick(('bd', 'b', '-bold', ' bold')),
+        'italic': pick(('i', '-italic', ' italic', '-oblique')),
+        'both': pick(('bi', 'z', '-bolditalic', ' bold italic'))}
+
+
 def get_font(pymupdf, path):
     """Load a user font, used for all text, in place of the built-in ones."""
     if not path or not os.path.isfile(path):
         return None
+    faces = font_variants(path)
+    rules = [
+        '@font-face {font-family: custom; src: url("%s"); font-weight: %s; '
+        'font-style: %s;}' % (name, weight, slant)
+        for name, weight, slant in (
+            (faces['regular'], 'normal', 'normal'),
+            (faces['bold'], 'bold', 'normal'),
+            (faces['italic'], 'normal', 'italic'),
+            (faces['both'], 'bold', 'italic'))
+        if name]
     return {
         'archive': pymupdf.Archive(os.path.dirname(path)),
-        'css': '@font-face {font-family: custom; src: url("%s");}\n'
-        % os.path.basename(path)}
+        'css': '\n'.join(rules) + '\n'}
 
 
 def get_css(style, scale, font=None):
@@ -739,6 +965,183 @@ def fits(pymupdf, rect, markup, css, archive=None):
     return not more and filled[3] <= height + 0.01
 
 
+def _marker_tokens(text, runs):
+    """Markers split into tokens. A run that starts in another column is
+    opened at the beginning, and one that ends in another column is closed
+    at the end. Markers the paragraph does not know are dropped.
+    """
+    known = {int(number) for number in (runs or {})}
+    tokens, position = [], 0
+    for match in MARKER.finditer(text):
+        if match.start() > position:
+            tokens.append(('text', text[position:match.start()]))
+        kind = 'close' if match.group(1) else 'open'
+        # Unknown markers are kept as tokens so the space that separates
+        # them from the words is removed, and then nothing is written.
+        tokens.append((kind, int(match.group(2))))
+        position = match.end()
+    if position < len(text):
+        tokens.append(('text', text[position:]))
+    opened, closed = set(), set()
+    for kind, number in tokens:
+        if number not in known:
+            continue
+        if kind == 'open':
+            opened.add(number)
+        elif kind == 'close':
+            closed.add(number)
+    tokens = [('open', number) for number in sorted(closed - opened)] \
+        + tokens \
+        + [('close', number) for number in sorted(opened - closed)]
+    trimmed = []
+    for index, (kind, value) in enumerate(tokens):
+        if kind != 'text':
+            trimmed.append((kind, value))
+            continue
+        previous = tokens[index - 1][0] if index else None
+        following = tokens[index + 1][0] if index + 1 < len(tokens) else None
+        # The spaces that keep a marker off the words are not part of them.
+        if previous == 'open' and value[:1].isspace():
+            value = value[1:]
+        if following == 'close' and value[-1:].isspace():
+            value = value[:-1]
+        if value:
+            trimmed.append(('text', value))
+    return trimmed
+
+
+def _open_tag(run):
+    # A link is not an <a>. insert_htmlbox() would turn it into several
+    # overlapping annotations. The link is placed on the written words.
+    return '<span style="%s">' % (
+        'color:%s; font-weight:%s; font-style:%s' % (
+            run['color'], 'bold' if run['bold'] else 'normal',
+            'italic' if run['italic'] else 'normal'))
+
+
+def render_markup(text, runs):
+    """The translation as HTML, with its markers turned back into style."""
+    runs = {int(number): run for number, run in (runs or {}).items()}
+    parts, stack = [], []
+    for kind, value in _marker_tokens(text, runs):
+        if kind == 'text':
+            parts.append(html.escape(value))
+            continue
+        if kind == 'open' and value in runs:
+            stack.append((value, 'span'))
+            parts.append(_open_tag(runs[value]))
+            continue
+        if kind == 'open' or value not in runs:
+            continue
+        while stack:
+            number, tag = stack.pop()
+            parts.append('</%s>' % tag)
+            if number == value:
+                break
+    while stack:
+        _number, tag = stack.pop()
+        parts.append('</%s>' % tag)
+    return ''.join(parts)
+
+
+def _link_phrases(text, runs):
+    """The translated words of every run that carries a link."""
+    runs = {int(number): run for number, run in (runs or {}).items()}
+    active, buffers, order = [], {}, []
+    for kind, value in _marker_tokens(text, runs):
+        if kind == 'open':
+            active.append(value)
+            if value not in buffers:
+                buffers[value] = []
+                order.append(value)
+        elif kind == 'close':
+            active = [number for number in active if number != value]
+        else:
+            for number in active:
+                buffers[number].append(value)
+    phrases = []
+    for number in order:
+        run = runs[number]
+        if run.get('uri') or run.get('page') is not None:
+            phrases.append((run, ''.join(buffers[number])))
+    return phrases
+
+
+def _normalize(text):
+    return ' '.join(text.replace('\xa0', ' ').replace('\xad', '').split())
+
+
+def _phrase_rect(spans, phrase, start):
+    target = _normalize(phrase)
+    if not target:
+        return None, start
+    for index in range(start, len(spans)):
+        words, rect, count = '', None, 0
+        for span in spans[index:]:
+            words = _normalize(words + ' ' + span['text'])
+            box = span['bbox']
+            rect = list(box) if rect is None else [
+                min(rect[0], box[0]), min(rect[1], box[1]),
+                max(rect[2], box[2]), max(rect[3], box[3])]
+            count += 1
+            if words == target:
+                return rect, index + count
+            if not target.startswith(words):
+                break
+    return None, start
+
+
+def _link_exists(page, rect, uri=None, page_number=None):
+    for link in page.get_links():
+        if not overlaps(link['from'], rect, 0) \
+                or not overlaps(link['from'], rect, 1):
+            continue
+        if uri and link.get('uri') == uri:
+            return True
+        if page_number is not None and link.get('page') == page_number:
+            return True
+    return False
+
+
+def place_run_links(page, box, text, runs):
+    """Put each linked run's link on the words it was translated into.
+
+    Returns the original rectangles that were successfully replaced.
+    """
+    pymupdf = require_pymupdf()
+    spans = [
+        span for block in page.get_text('dict', clip=box)['blocks']
+        for line in block.get('lines', []) for span in line.get('spans', [])]
+    start, replaced = 0, set()
+    for run, phrase in _link_phrases(text, runs):
+        rect, start = _phrase_rect(spans, phrase, start)
+        if rect is None:
+            continue
+        if run.get('uri') and not _link_exists(page, rect, uri=run['uri']):
+            page.insert_link({
+                'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(rect),
+                'uri': run['uri']})
+        elif run.get('page') is not None and not _link_exists(
+                page, rect, page_number=run['page']):
+            destination = run.get('to') or (rect[0], rect[1])
+            page.insert_link({
+                'kind': pymupdf.LINK_GOTO, 'from': pymupdf.Rect(rect),
+                'page': run['page'],
+                'to': pymupdf.Point(destination[0], destination[1])})
+        if run.get('from'):
+            replaced.add(tuple(round(float(v), 1) for v in run['from']))
+    return replaced
+
+
+def pdf_prompt_extension():
+    return (
+        'Some words are wrapped in inline markers such as ⟦1⟧ and ⟦/1⟧. '
+        'They only record formatting. Translate the words between them. '
+        'Keep every marker exactly as it is, immediately beside the same '
+        'words. Do not translate, drop, renumber or reorder the markers.'
+    )
+
+
 def write_part(page, part, text, element, font=None):
     """Write a translation into the area of its original. A smaller font is
     used only when it fits neither the original area nor the free space.
@@ -750,7 +1153,8 @@ def write_part(page, part, text, element, font=None):
         style['color'] = element.translation_color
     direction = ' dir="rtl"' if element.target_direction == 'rtl' else ''
     # Not <p>: MuPDF keeps the default margins of <p> whatever the CSS says.
-    markup = '<div%s>%s</div>' % (direction, html.escape(text))
+    markup = '<div%s>%s</div>' % (
+        direction, render_markup(text, getattr(element, 'runs', None)))
     archive = font['archive'] if font else None
     # The original lines are as tall as their glyphs, while CSS puts half of
     # the line spacing above and below them. Make up for that, and for the
@@ -761,28 +1165,39 @@ def write_part(page, part, text, element, font=None):
                    for x0, y0, x1, y1 in (part['rect'], part['frame']))
     attempts = [(rect, 1.0)]
     attempts += [(frame, scale) for scale in FONT_SCALES + FALLBACK_SCALES]
+    used = None
     for box, scale in attempts:
         css = get_css(style, scale, font)
         if fits(pymupdf, box, markup, css, archive):
             page.insert_htmlbox(
                 box, markup, css=css, scale_low=1, archive=archive)
-            return scale
-    log.warning('The translation does not fit its area: %s' % text[:80])
-    _spare_height, scale = page.insert_htmlbox(
-        frame, markup, css=get_css(style, 1.0, font), scale_low=0,
-        archive=archive)
-    return scale
+            used = (box, scale)
+            break
+    if used is None:
+        log.warning('The translation does not fit its area: %s' % text[:80])
+        _spare_height, scale = page.insert_htmlbox(
+            frame, markup, css=get_css(style, 1.0, font), scale_low=0,
+            archive=archive)
+        used = (frame, scale)
+    part['replaced_links'] = place_run_links(
+        page, used[0], text, getattr(element, 'runs', None))
+    return used[1]
 
 
-def restore_links(page, links):
-    """Redaction removes the links that overlap the erased text."""
+def restore_links(page, links, replaced=()):
+    """Put back the links that redaction removed.
+
+    ``replaced`` holds the links that were written again on the translated
+    words. Those are not put back at their old position.
+    """
     def key(link):
-        return tuple(round(value, 1) for value in link['from'])
+        return tuple(round(float(value), 1) for value in link['from'])
     remaining = {key(link) for link in page.get_links()}
     for link in links:
-        if key(link) not in remaining:
-            page.insert_link(
-                {k: v for k, v in link.items() if k not in ('xref', 'id')})
+        if key(link) in replaced or key(link) in remaining:
+            continue
+        page.insert_link(
+            {k: v for k, v in link.items() if k not in ('xref', 'id')})
 
 
 def interleave_pages(pymupdf, input_path, translated, position):
@@ -830,10 +1245,14 @@ def compose_pdf(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             text=pymupdf.PDF_REDACT_TEXT_REMOVE)
-        restore_links(page, links)
+        replaced = set()
         for part, text, element in items:
             if text:
                 scales.append(write_part(page, part, text, element, font))
+                replaced.update(part.get('replaced_links') or ())
+        # After writing, so a link that landed on the new words is not also
+        # put back on the old ones.
+        restore_links(page, links, replaced)
     if position != 'only':
         document = interleave_pages(pymupdf, input_path, document, position)
     # Every inserted text box embeds its own copy of the fonts.

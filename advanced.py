@@ -17,7 +17,7 @@ from .lib.config import get_config
 from .lib.encodings import encoding_list
 from .lib.cache import Paragraph, get_cache, get_cache_id
 from .lib.srt import srt_prompt_extension, repair_srt_groups
-from .lib.pdf import is_pdf_layout
+from .lib.pdf import is_pdf_layout, pdf_prompt_extension
 from .lib.translation import get_engine_class, get_translator, get_translation
 from .lib.element import get_element_handler
 from .lib.conversion import extract_item, extra_formats
@@ -174,6 +174,7 @@ class TranslationWorker(QObject):
         self.source_lang = ebook.source_lang
         self.target_lang = ebook.target_lang
         self.input_format = ebook.input_format
+        self.output_format = ebook.output_format
         self.engine_class = engine_class
 
         self.on_working = False
@@ -212,6 +213,8 @@ class TranslationWorker(QObject):
         if is_srt and translator.merge_enabled:
             translator.set_prompt_extension(
                 srt_prompt_extension(translator.placeholder))
+        elif is_pdf_layout(self.input_format, self.output_format):
+            translator.set_prompt_extension(pdf_prompt_extension())
         translation = get_translation(translator)
         translation.set_fresh(fresh)
         translation.set_alignment(not is_srt)

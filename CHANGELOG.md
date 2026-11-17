@@ -1,3 +1,14 @@
+## v2.4.4
+
+1. feat: Translate a PDF in place so the output keeps the original page layout. The path stays off unless `pdf_layout.enabled` is on, and it runs only when both the input and the output are PDF. PyMuPDF is installed into the Calibre configuration folder when it is missing.
+2. feat: Keep inline color, bold, italic and links. Runs that differ from the paragraph style are sent between `⟦n⟧` and `⟦/n⟧` markers and written back as styled text. A link is placed on the translated words.
+3. feat: A custom PDF font also loads a bold, italic or bold-italic face from the same folder when the file name ends with `bd`, `b`, `i`, `bi` or `z`.
+4. fix: Google(Free)New keeps a style marker whole when a request is split at the URL limit.
+5. change: In-place PDF translations use the cache suffix `pdf-layout-v1`, so they do not reuse a cache built by Calibre's PDF conversion.
+6. docs: Add `docs/PDF_LAYOUT.md`, including how to turn the layout on from the CLI.
+
+---
+
 ## v2.4.3
 
 1. fix: SRT subtitles are split by timing lines and every cue is translated under its own timestamp. Merged requests carry numbered cue markers, so translations no longer pile up under one cue.
