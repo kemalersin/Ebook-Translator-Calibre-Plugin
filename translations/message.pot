@@ -1213,3 +1213,79 @@ msgstr ""
 #: ui.py:166
 msgid "Choose Translation Mode"
 msgstr ""
+
+#: setting.py:292
+msgid "Keep PDF Layout"
+msgstr ""
+
+#: setting.py:295
+msgid "Translate PDF files in place when the output format is PDF"
+msgstr ""
+
+#: setting.py:300
+msgid "Built-in fonts"
+msgstr ""
+
+#: setting.py:306
+msgid "Font"
+msgstr ""
+
+#: setting.py:322
+msgid "PyMuPDF is not installed. It is about 60 MB."
+msgstr ""
+
+#: setting.py:323
+msgid "Install"
+msgstr ""
+
+#: setting.py:326
+msgid "PyMuPDF {} is installed."
+msgstr ""
+
+#: setting.py:327
+msgid "Reinstall"
+msgstr ""
+
+#: setting.py:332
+msgid "Downloading PyMuPDF {}: {} / {} MB"
+msgstr ""
+
+#: setting.py:343
+msgid "Connecting..."
+msgstr ""
+
+#: lib/pdf.py:116
+msgid ""
+"PyMuPDF is required to keep the layout of PDF files. Please install it in "
+"the General tab of the plugin settings."
+msgstr ""
+
+#: lib/pdf.py:200
+msgid "PyMuPDF is in use. Please restart calibre and try again."
+msgstr ""
+
+#: lib/pdf.py:206
+msgid "PyMuPDF {} is not available for this system ({} {}, Python {})."
+msgstr ""
+
+#: lib/pdf.py:213
+msgid "The downloaded file is damaged. Please try again."
+msgstr ""
+
+#: lib/pdf.py:659
+msgid "The PDF file is encrypted."
+msgstr ""
+
+#: lib/pdf.py:687
+msgid ""
+"No text was found in the PDF file. Scanned pages need OCR, which is not "
+"supported."
+msgstr ""
+
+#: lib/conversion.py:169
+msgid "Starting to output PDF file..."
+msgstr ""
+
+#: lib/conversion.py:176
+msgid "The translation of the PDF file was completed."
+msgstr ""

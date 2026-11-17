@@ -25,6 +25,7 @@ from .element import (
     get_metadata_elements, get_pgn_elements)
 from .srt import (
     get_srt_elements, compose_srt, repair_srt_groups, srt_prompt_extension)
+from .pdf import is_pdf_layout, get_pdf_elements, compose_pdf
 from .translation import get_translator, get_translation
 from .exception import ConversionAbort
 
@@ -148,6 +149,39 @@ def convert_pgn(
     log.info(_('The translation of the PGN file was completed.'))
 
 
+def convert_pdf(
+        input_path, output_path, translation, element_handler, cache,
+        debug_info, encoding, notification, font_path=None) -> None:
+    """Translate a PDF in place instead of converting it with calibre."""
+    log.info('Translating PDF content... (this will take a while)')
+    log.info(debug_info)
+    if not font_path:
+        font_path = get_config().get('pdf_layout.font_path')
+    if font_path and not os.path.isfile(font_path):
+        log.warning(_(
+            'The selected font file was not found: {}').format(font_path))
+        font_path = None
+
+    elements = get_pdf_elements(input_path, encoding)
+    original_group = element_handler.prepare_original(elements)
+    cache.save(original_group)
+
+    paragraphs = cache.all_paragraphs()
+    translation.set_progress(notification)
+    translation.handle(paragraphs)
+    element_handler.add_translations(paragraphs)
+
+    log.info(sep())
+    log.info(_('Starting to output PDF file...'))
+    log.info(sep())
+
+    scales = compose_pdf(
+        input_path, output_path, elements, element_handler.position,
+        font_path)
+    log.info('Font scales of the translated paragraphs: %s' % dict(scales))
+    log.info(_('The translation of the PDF file was completed.'))
+
+
 extra_formats: dict[str, dict[str, Callable]] = {
     'srt': {
         'extractor': get_srt_elements,
@@ -160,9 +194,13 @@ extra_formats: dict[str, dict[str, Callable]] = {
 }
 
 
-def extract_item(input_path, input_format, encoding, callback=None):
+def extract_item(
+        input_path, input_format, encoding, callback=None,
+        output_format=None):
     if callback is not None:
         log.outputs = [Stream(PrepareStream(callback))]
+    if is_pdf_layout(input_format, output_format):
+        return get_pdf_elements(input_path, encoding)
     handler = extra_formats.get(input_format)
     extractor = extract_book if handler is None else handler['extractor']
     return extractor(input_path, encoding)
@@ -195,10 +233,15 @@ def extract_book(input_path, encoding):
 
 def convert_item(
         ebook_title, input_path, output_path, source_lang, target_lang,
-        cache_only, is_batch, format, encoding, direction, notification):
+        cache_only, is_batch, format, encoding, direction, notification,
+        font_path=None):
     """The following parameters need attention:
     :cache_only: Only use the translation which exists in the cache.
     :notification: It is automatically added by arbitrary_n.
+    :font_path: A TTF or OTF file for every paragraph of a PDF translated in
+    place. It also selects that path for this call when the setting is off.
+    Calibre's job passes notification as the last positional argument, so
+    this parameter stays after it and has a default.
     """
     translator = get_translator()
     translator.set_source_lang(source_lang)
@@ -213,9 +256,14 @@ def convert_item(
         translator.get_iso639_target_code(target_lang))
 
     merge_length = str(element_handler.get_merge_length())
+    output_format = os.path.splitext(output_path)[1][1:].lower()
+    # A font given for this call translates the PDF in place even when the
+    # setting is off. The cache has to follow that choice.
+    layout = is_pdf_layout(format, output_format) or (
+        format == 'pdf' and output_format == 'pdf' and bool(font_path))
     cache_id = get_cache_id(
         input_path, translator.name, target_lang, merge_length, encoding,
-        format)
+        format, output_format, layout)
     cache = get_cache(cache_id)
     cache.set_cache_only(cache_only)
     cache.set_info('title', ebook_title)
@@ -246,12 +294,17 @@ def convert_item(
     debug_info += '| Request Timeout: %s\n' % translator.request_timeout
     debug_info += '| Input Path: %s\n' % input_path
     debug_info += '| Output Path: %s' % output_path
+    if layout and font_path:
+        debug_info += '\n| PDF Font: %s' % font_path
 
     handler: dict[str, Callable] | None = extra_formats.get(format)
     convertor = convert_book if handler is None else handler['convertor']
+    if layout:
+        convertor = convert_pdf
     convertor(
         input_path, output_path, translation, element_handler, cache,
-        debug_info, encoding, notification)
+        debug_info, encoding, notification,
+        **({'font_path': font_path} if layout else {}))
     cache.done()
 
 

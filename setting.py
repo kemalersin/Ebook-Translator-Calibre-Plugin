@@ -16,6 +16,7 @@ from .lib.config import get_config
 from .lib.utils import (
     log, css, is_proxy_available, traceback_error, socks_proxy)
 from .lib.translation import get_engine_class, get_translator
+from .lib.pdf import PYMUPDF_VERSION, get_installed_version, install_pymupdf
 from .engines import (
     builtin_engines, GeminiTranslate, ChatgptTranslate, AzureChatgptTranslate)
 from .engines.genai import GenAI
@@ -53,6 +54,26 @@ class ModelWorker(QObject):
         self.finished.emit()
 
 
+class PymupdfWorker(QObject):
+    start = pyqtSignal()
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(str)
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.start.connect(self.install)
+
+    @pyqtSlot()
+    def install(self):
+        try:
+            install_pymupdf(self.progress.emit)
+            self.finished.emit('')
+        except Exception:
+            error = traceback_error()
+            log.error('Failed to install PyMuPDF: %s' % error)
+            self.finished.emit(error)
+
+
 def layout_scroll_area(name):
     def decorator(func):
         def scroll_widget(dialog):
@@ -84,6 +105,7 @@ class TranslationSetting(QDialog):
     save_config = pyqtSignal(int)
     fetch_models = pyqtSignal()
     model_thread = QThread()
+    pymupdf_thread = QThread()
 
     def __init__(self, plugin, parent, icon):
         QDialog.__init__(self, parent)
@@ -98,6 +120,11 @@ class TranslationSetting(QDialog):
         self.model_worker.moveToThread(self.model_thread)
         self.model_thread.finished.connect(self.model_worker.deleteLater)
         self.model_thread.start()
+
+        self.pymupdf_worker = PymupdfWorker()
+        self.pymupdf_worker.moveToThread(self.pymupdf_thread)
+        self.pymupdf_thread.finished.connect(self.pymupdf_worker.deleteLater)
+        self.pymupdf_thread.start()
 
         self.main_layout()
 
@@ -259,6 +286,83 @@ class TranslationSetting(QDialog):
         merge_enabled.setChecked(self.config.get('merge_enabled'))
         merge_enabled.clicked.connect(
             lambda checked: self.config.update(merge_enabled=checked))
+
+        # PDF Layout
+        pdf_group = QGroupBox(
+            '%s %s' % (_('Keep PDF Layout'), _('(Beta)')))
+        pdf_layout = QGridLayout(pdf_group)
+        pdf_enabled = QCheckBox(_(
+            'Translate PDF files in place when the output format is PDF'))
+        pdf_status = QLabel()
+        pdf_install = QPushButton()
+        pdf_font = QLineEdit()
+        pdf_font.setReadOnly(True)
+        pdf_font.setPlaceholderText(_('Built-in fonts'))
+        pdf_font_choose = QPushButton(_('Choose'))
+        pdf_font_clear = QPushButton(_('Clear'))
+        pdf_layout.addWidget(pdf_enabled, 0, 0, 1, 4)
+        pdf_layout.addWidget(pdf_status, 1, 0, 1, 3)
+        pdf_layout.addWidget(pdf_install, 1, 3)
+        pdf_layout.addWidget(QLabel(_('Font')), 2, 0)
+        pdf_layout.addWidget(pdf_font, 2, 1)
+        pdf_layout.addWidget(pdf_font_choose, 2, 2)
+        pdf_layout.addWidget(pdf_font_clear, 2, 3)
+        pdf_layout.setColumnStretch(1, 1)
+        layout.addWidget(pdf_group)
+
+        def update_pdf_layout(**kwargs):
+            pdf_config = dict(self.config.get('pdf_layout') or {})
+            pdf_config.update(kwargs)
+            self.config.update(pdf_layout=pdf_config)
+
+        def refresh_pymupdf_status():
+            version = get_installed_version()
+            if version is None:
+                pdf_status.setText(_(
+                    'PyMuPDF is not installed. It is about 60 MB.'))
+                pdf_install.setText(_('Install'))
+            else:
+                pdf_status.setText(
+                    _('PyMuPDF {} is installed.').format(version))
+                pdf_install.setText(_('Reinstall'))
+            pdf_install.setDisabled(False)
+        refresh_pymupdf_status()
+
+        def show_install_progress(received, total):
+            pdf_status.setText(_('Downloading PyMuPDF {}: {} / {} MB').format(
+                PYMUPDF_VERSION, round(received / 1048576),
+                round(total / 1048576) or '?'))
+
+        def finish_install(error):
+            refresh_pymupdf_status()
+            if error:
+                self.alert.pop(error, 'warning')
+
+        def start_install():
+            pdf_install.setDisabled(True)
+            pdf_status.setText(_('Connecting...'))
+            self.pymupdf_worker.start.emit()
+        pdf_install.clicked.connect(start_install)
+        self.pymupdf_worker.progress.connect(show_install_progress)
+        self.pymupdf_worker.finished.connect(finish_install)
+
+        pdf_enabled.setChecked(bool(self.config.get('pdf_layout.enabled')))
+        pdf_enabled.toggled.connect(
+            lambda checked: update_pdf_layout(enabled=checked))
+        pdf_font.setText(self.config.get('pdf_layout.font_path') or '')
+
+        def choose_font():
+            path = QFileDialog.getOpenFileName(
+                filter='Fonts (*.ttf *.otf)')[0]
+            if path:
+                pdf_font.setText(path)
+                update_pdf_layout(font_path=path)
+        pdf_font_choose.clicked.connect(choose_font)
+
+        def clear_font():
+            pdf_font.clear()
+            update_pdf_layout(font_path=None)
+        pdf_font_clear.clicked.connect(clear_font)
 
         # Network Proxy
         proxy_group = QGroupBox(_('Network Proxy'))

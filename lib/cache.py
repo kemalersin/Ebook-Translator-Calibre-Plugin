@@ -326,15 +326,22 @@ class TranslationCache:
 
 def get_cache_id(
         input_path, engine_name, target_lang, merge_length, encoding,
-        input_format):
+        input_format, output_format=None, layout=None):
     """The SRT version is part of the identity because the way subtitles are
-    split and merged changed; caches built before cannot be reused.
+    split and merged changed; caches built before cannot be reused. A PDF
+    translated in place is split into paragraphs differently from a PDF
+    converted by calibre, so the two cannot share a cache either. ``layout``
+    says so explicitly; without it the PDF setting is checked.
     """
+    from .pdf import PDF_CACHE_VERSION, is_pdf_layout
     _encoding = '' if encoding.lower() == 'utf-8' else encoding.lower()
     version = ''
     if input_format == 'srt':
         from .srt import SRT_CACHE_VERSION
         version = SRT_CACHE_VERSION
+    elif layout or (layout is None and is_pdf_layout(
+            input_format, output_format)):
+        version = PDF_CACHE_VERSION
     return uid(
         input_path + engine_name + target_lang + str(merge_length)
         + _encoding + version)

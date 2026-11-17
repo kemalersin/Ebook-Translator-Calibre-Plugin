@@ -46,6 +46,10 @@ defaults: dict[str, Any] = {
     'merge_length': 1800,
     'ebook_metadata': {},
     'search_paths': [],
+    'pdf_layout': {
+        'enabled': False,
+        'font_path': None,
+    },
 }
 
 

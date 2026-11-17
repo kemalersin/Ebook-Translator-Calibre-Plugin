@@ -17,6 +17,7 @@ from .lib.config import get_config
 from .lib.encodings import encoding_list
 from .lib.cache import Paragraph, get_cache, get_cache_id
 from .lib.srt import srt_prompt_extension, repair_srt_groups
+from .lib.pdf import is_pdf_layout
 from .lib.translation import get_engine_class, get_translator, get_translation
 from .lib.element import get_element_handler
 from .lib.conversion import extract_item, extra_formats
@@ -94,7 +95,8 @@ class PreparationWorker(QObject):
         merge_length = str(element_handler.get_merge_length())
         cache_id = get_cache_id(
             input_path, self.engine_class.name, self.ebook.target_lang,
-            merge_length, self.ebook.encoding, self.ebook.input_format)
+            merge_length, self.ebook.encoding, self.ebook.input_format,
+            self.ebook.output_format)
         cache = get_cache(cache_id)
 
         if cache.is_fresh() or not cache.is_persistence():
@@ -113,7 +115,7 @@ class PreparationWorker(QObject):
             try:
                 elements = extract_item(
                     input_path, self.ebook.input_format, self.ebook.encoding,
-                    self.progress_detail.emit)
+                    self.progress_detail.emit, self.ebook.output_format)
             except Exception:
                 self.progress_message.emit(
                     _('Failed to extract ebook content'))
@@ -916,7 +918,10 @@ class AdvancedTranslation(QDialog):
 
         def change_output_format(_format):
             self.ebook.set_output_format(_format)
-        if self.ebook.is_extra_format():
+        # The extracted content depends on the output format when a PDF is
+        # translated in place, so the format cannot change afterwards.
+        if self.ebook.is_extra_format() or is_pdf_layout(
+                self.ebook.input_format, self.ebook.output_format):
             output_format.lock_format(self.ebook.input_format)
             change_output_format(self.ebook.input_format)
         else:

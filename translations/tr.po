@@ -933,5 +933,67 @@ msgstr "Önbellek Yöneticisi"
 msgid "Choose Translation Mode"
 msgstr "Çeviri Modunu Seçin"
 
+msgid "Keep PDF Layout"
+msgstr "PDF Düzenini Koru"
+
+msgid "Translate PDF files in place when the output format is PDF"
+msgstr "Çıktı formatı PDF olduğunda PDF dosyalarını yerinde çevir"
+
+msgid "Built-in fonts"
+msgstr "Yerleşik yazı tipleri"
+
+msgid "Font"
+msgstr "Yazı tipi"
+
+msgid "PyMuPDF is not installed. It is about 60 MB."
+msgstr "PyMuPDF kurulu değil. Yaklaşık 60 MB."
+
+msgid "Install"
+msgstr "Kur"
+
+msgid "PyMuPDF {} is installed."
+msgstr "PyMuPDF {} kurulu."
+
+msgid "Reinstall"
+msgstr "Yeniden kur"
+
+msgid "Downloading PyMuPDF {}: {} / {} MB"
+msgstr "PyMuPDF {} indiriliyor: {} / {} MB"
+
+msgid "Connecting..."
+msgstr "Bağlanılıyor..."
+
+msgid ""
+"PyMuPDF is required to keep the layout of PDF files. Please install it in "
+"the General tab of the plugin settings."
+msgstr ""
+"PDF dosyalarının düzenini korumak için PyMuPDF gerekli. Lütfen eklenti "
+"ayarlarının Genel sekmesinden kurun."
+
+msgid "PyMuPDF is in use. Please restart calibre and try again."
+msgstr "PyMuPDF kullanımda. Lütfen Calibre'yi yeniden başlatıp tekrar deneyin."
+
+msgid "PyMuPDF {} is not available for this system ({} {}, Python {})."
+msgstr "PyMuPDF {} bu sistem için yok ({} {}, Python {})."
+
+msgid "The downloaded file is damaged. Please try again."
+msgstr "İndirilen dosya bozuk. Lütfen tekrar deneyin."
+
+msgid "The PDF file is encrypted."
+msgstr "PDF dosyası şifreli."
+
+msgid ""
+"No text was found in the PDF file. Scanned pages need OCR, which is not "
+"supported."
+msgstr ""
+"PDF dosyasında metin bulunamadı. Taranmış sayfalar için OCR gerekir; bu "
+"desteklenmiyor."
+
+msgid "Starting to output PDF file..."
+msgstr "PDF dosyasının çıktısı alınmaya başlanıyor..."
+
+msgid "The translation of the PDF file was completed."
+msgstr "PDF dosyasının çevirisi tamamlandı."
+
 #~ msgid "HTTP Proxy"
 #~ msgstr "HTTP Proxy"
