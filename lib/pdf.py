@@ -475,9 +475,13 @@ def get_alignment(lines, size):
     if max(centers) - min(centers) < 0.25 * size \
             and max(widths) - min(widths) > 2:
         return 'center'
-    # The last line is full when the paragraph goes on in the next column.
-    if all(abs(line['bbox'][2] - right) < 1 for line in lines[:-1]) \
-            and (len(lines) > 2 or lines[-1]['bbox'][2] < right - size):
+    # One long line followed by a short one only proves that the first line
+    # is the longer of the two. Its right edge is then this block's own
+    # maximum, so a wrapped sentence looks justified and the translation is
+    # stretched until the gaps swallow the line. A real column has at least
+    # two lines that share the right margin.
+    if len(lines) > 2 and right - left >= 16 * size \
+            and all(abs(line['bbox'][2] - right) < 1 for line in lines[:-1]):
         return 'justify'
     return 'left'
 
@@ -556,6 +560,15 @@ def _run_record(key, links):
     return record
 
 
+# Spaces and dot leaders that only stretch a contents entry to the page number.
+_LEADER = re.compile(r'(?:\s*[.·∙•⋅]\s*){3,}|[ \t]{2,}')
+
+
+def _link_text(text):
+    """The words of a link, without the padding after them."""
+    return _LEADER.sub(' ', text).strip()
+
+
 def _pieces_of_line(line, links):
     pieces = []
     for span in line['spans']:
@@ -618,6 +631,8 @@ def mark_paragraph(lines, style, links, ids):
     runs, parts = {}, []
     for piece in pieces:
         text, key = piece['text'], piece['key']
+        if key not in (None, base) and key[3] is not None:
+            text = _link_text(text)
         if key in (None, base) or text.strip() == '':
             parts.append(text)
             continue
@@ -1094,24 +1109,66 @@ def _normalize(text):
     return ' '.join(text.replace('\xa0', ' ').replace('\xad', '').split())
 
 
+def _span_text(span):
+    if span.get('text'):
+        return span['text']
+    return ''.join(char.get('c', '') for char in span.get('chars') or [])
+
+
+def _ink_rects(spans, size):
+    """Rectangles around the drawn characters.
+
+    Trailing spaces are left out, and a gap wide enough to be a contents
+    leader starts a new rectangle instead of underlining the empty space.
+    """
+    boxes = []
+    for span in spans:
+        chars = [
+            char['bbox'] for char in span.get('chars') or []
+            if char.get('c') and not char['c'].isspace()]
+        if chars:
+            boxes.extend(chars)
+        elif _span_text(span).strip():
+            boxes.append(span['bbox'])
+    if not boxes:
+        return []
+    gap = 1.25 * (size or 10)
+    clusters, current = [], [boxes[0]]
+    for box in boxes[1:]:
+        # A wrapped line starts further left, or at least a line below.
+        # One rectangle around both lines underlines the empty space.
+        if box[1] - current[-1][1] > 0.6 * (size or 10) \
+                or box[0] - current[-1][2] > gap:
+            clusters.append(current)
+            current = []
+        current.append(box)
+    clusters.append(current)
+
+    def union(group):
+        return [
+            min(box[0] for box in group), min(box[1] for box in group),
+            max(box[2] for box in group), max(box[3] for box in group)]
+
+    return [union(group) for group in clusters]
+
+
 def _phrase_rect(spans, phrase, start):
+    """The ink rectangles of ``phrase`` and the index of the next span."""
     target = _normalize(phrase)
     if not target:
-        return None, start
+        return [], start
     for index in range(start, len(spans)):
-        words, rect, count = '', None, 0
+        words, count = '', 0
         for span in spans[index:]:
-            words = _normalize(words + ' ' + span['text'])
-            box = span['bbox']
-            rect = list(box) if rect is None else [
-                min(rect[0], box[0]), min(rect[1], box[1]),
-                max(rect[2], box[2]), max(rect[3], box[3])]
+            words = _normalize(words + ' ' + _span_text(span))
             count += 1
             if words == target:
-                return rect, index + count
+                used = spans[index:index + count]
+                size = used[0].get('size') or 10
+                return _ink_rects(used, size), index + count
             if not target.startswith(words):
                 break
-    return None, start
+    return [], start
 
 
 def _link_exists(page, rect, uri=None, page_number=None):
@@ -1126,7 +1183,71 @@ def _link_exists(page, rect, uri=None, page_number=None):
     return False
 
 
-def place_run_links(page, box, text, runs):
+def _link_key(link):
+    return tuple(round(float(value), 1) for value in link['from'])
+
+
+def _link_bars(drawings, links):
+    """The drawn underlines of links.
+
+    A link's blue line is a filled rectangle in the page content, not part
+    of the annotation. Text redaction leaves it where it was, so it keeps
+    the old word's width after the translation gets shorter.
+    """
+    bars = []
+    for drawing in drawings:
+        rect = drawing['rect']
+        width, height = rect.x1 - rect.x0, rect.y1 - rect.y0
+        if width < 8 or height <= 0 or height > 2:
+            continue
+        fill = drawing.get('fill') or drawing.get('color')
+        if not fill:
+            continue
+        middle = (rect.y0 + rect.y1) / 2
+        for link in links:
+            box = link['from']
+            link_width = box[2] - box[0]
+            if link_width <= 0 or not box[1] <= middle <= box[3] + 2:
+                continue
+            # A rule that only crosses the link is wider than the link.
+            if width > link_width * 1.15 + 2:
+                continue
+            overlap = min(rect.x1, box[2]) - max(rect.x0, box[0])
+            if overlap < 0.8 * width:
+                continue
+            bars.append({
+                'rect': [rect.x0, rect.y0, rect.x1, rect.y1],
+                'fill': tuple(fill), 'link': _link_key(link)})
+            break
+    return bars
+
+
+def _paint_bar(page, rect, fill):
+    pymupdf = require_pymupdf()
+    page.draw_rect(pymupdf.Rect(rect), fill=fill, color=None, width=0)
+
+
+def _remove_drawings(page, rects):
+    """Remove line art covered by these rectangles, and leave the text."""
+    if not rects:
+        return
+    pymupdf = require_pymupdf()
+    for rect in rects:
+        page.add_redact_annot(rect)
+    page.apply_redactions(
+        images=pymupdf.PDF_REDACT_IMAGE_NONE,
+        graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+        text=pymupdf.PDF_REDACT_TEXT_NONE)
+
+
+def _bar_on_ink(bar, ink):
+    """The same stroke, moved under the letters it now belongs to."""
+    height = bar['rect'][3] - bar['rect'][1]
+    bottom = ink[3] - 1.15
+    return [ink[0], bottom - height, ink[2], bottom]
+
+
+def place_run_links(page, box, text, runs, bars=()):
     """Put each linked run's link on the words it was translated into.
 
     Returns the original rectangles that were successfully replaced.
@@ -1135,26 +1256,33 @@ def place_run_links(page, box, text, runs):
     # Glyphs can extend a fraction outside the box they were written into.
     clip = (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2)
     spans = [
-        span for block in page.get_text('dict', clip=clip)['blocks']
+        span for block in page.get_text('rawdict', clip=clip)['blocks']
         for line in block.get('lines', []) for span in line.get('spans', [])]
     start, replaced = 0, set()
+    bars_of = {bar['link']: bar for bar in bars}
     for run, phrase in _link_phrases(text, runs):
-        rect, start = _phrase_rect(spans, phrase, start)
-        if rect is None:
+        rects, start = _phrase_rect(spans, phrase, start)
+        if not rects:
             continue
-        if run.get('uri') and not _link_exists(page, rect, uri=run['uri']):
-            page.insert_link({
-                'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(rect),
-                'uri': run['uri']})
-        elif run.get('page') is not None and not _link_exists(
-                page, rect, page_number=run['page']):
-            destination = run.get('to') or (rect[0], rect[1])
-            page.insert_link({
-                'kind': pymupdf.LINK_GOTO, 'from': pymupdf.Rect(rect),
-                'page': run['page'],
-                'to': pymupdf.Point(destination[0], destination[1])})
+        for rect in rects:
+            if run.get('uri') and not _link_exists(page, rect, uri=run['uri']):
+                page.insert_link({
+                    'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(rect),
+                    'uri': run['uri']})
+            elif run.get('page') is not None and not _link_exists(
+                    page, rect, page_number=run['page']):
+                destination = run.get('to') or (rect[0], rect[1])
+                page.insert_link({
+                    'kind': pymupdf.LINK_GOTO, 'from': pymupdf.Rect(rect),
+                    'page': run['page'],
+                    'to': pymupdf.Point(destination[0], destination[1])})
         if run.get('from'):
-            replaced.add(tuple(round(float(v), 1) for v in run['from']))
+            key = tuple(round(float(v), 1) for v in run['from'])
+            replaced.add(key)
+            bar = bars_of.get(key)
+            if bar:
+                for rect in rects:
+                    _paint_bar(page, _bar_on_ink(bar, rect), bar['fill'])
     return replaced
 
 
@@ -1167,7 +1295,7 @@ def pdf_prompt_extension():
     )
 
 
-def write_part(page, part, text, element, font=None):
+def write_part(page, part, text, element, font=None, bars=()):
     """Write a translation into the area of its original. A smaller font is
     used only when it fits neither the original area nor the free space.
     Return the scale of the font.
@@ -1205,7 +1333,7 @@ def write_part(page, part, text, element, font=None):
             archive=archive)
         used = (frame, scale)
     part['replaced_links'] = place_run_links(
-        page, used[0], text, getattr(element, 'runs', None))
+        page, used[0], text, getattr(element, 'runs', None), bars)
     return used[1]
 
 
@@ -1263,9 +1391,16 @@ def compose_pdf(
     for number, items in sorted(pages.items()):
         page = document[number]
         links = page.get_links()
-        for part, _text, _element in items:
-            for bbox in part['lines']:
-                page.add_redact_annot(bbox)
+        line_boxes = [
+            bbox for part, _text, _element in items for bbox in part['lines']]
+        bars = [
+            bar for bar in _link_bars(page.get_drawings(), links)
+            if any(overlaps(bar['rect'], bbox, 0)
+                   and overlaps(bar['rect'], bbox, 1) for bbox in line_boxes)]
+        # Before the new glyphs are drawn: their boxes cover the old bar.
+        _remove_drawings(page, [bar['rect'] for bar in bars])
+        for bbox in line_boxes:
+            page.add_redact_annot(bbox)
         page.apply_redactions(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
@@ -1273,8 +1408,12 @@ def compose_pdf(
         replaced = set()
         for part, text, element in items:
             if text:
-                scales.append(write_part(page, part, text, element, font))
+                scales.append(write_part(
+                    page, part, text, element, font, bars))
                 replaced.update(part.get('replaced_links') or ())
+        for bar in bars:
+            if bar['link'] not in replaced:
+                _paint_bar(page, bar['rect'], bar['fill'])
         # After writing, so a link that landed on the new words is not also
         # put back on the old ones.
         restore_links(page, links, replaced)

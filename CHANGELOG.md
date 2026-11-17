@@ -1,3 +1,10 @@
+## v2.4.7
+
+1. fix: Two short lines, and a long line followed by a short one, are no longer treated as justified. The translation is no longer stretched until the gaps swallow the line.
+2. fix: Dot leaders and padding spaces inside a link are not sent for translation. The link and its drawn underline follow the translated words instead of keeping the original width.
+
+---
+
 ## v2.4.6
 
 1. fix: A paragraph frame no longer runs through the next line when the line boxes overlap. The continuation is kept in the same paragraph, and the translation uses the free space below it instead of being written on top of the following line. A full-page picture no longer widens a single line to the page edge.

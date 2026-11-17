@@ -21,7 +21,7 @@ from ...lib.pdf import (
     get_installed_version, load_pymupdf, is_pdf_layout, PdfElement,
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
     mark_lines, LIST_ITEM, render_markup, font_variants,
-    pdf_prompt_extension, _link_phrases)
+    pdf_prompt_extension, _link_phrases, _ink_rects)
 from ...engines.base import Base
 
 
@@ -111,6 +111,41 @@ class TestMarkers(unittest.TestCase):
         self.assertEqual('#008000', made['runs'][1]['color'])
         self.assertTrue(made['runs'][1]['bold'])
         self.assertFalse(made['runs'][1]['italic'])
+
+    def test_link_drops_leader_padding(self):
+        linked = span('Chapter 1 . . . . . 12')
+        linked['bbox'] = (40, 80, 400, 96)
+        made = self.paragraph([linked], links=[{
+            'from': [40, 80, 400, 96], 'page': 3}])
+        self.assertEqual('⟦1⟧ Chapter 1 12 ⟦/1⟧', made['text'])
+        self.assertEqual(3, made['runs'][1]['page'])
+        padded = span('Dedication          ')
+        padded['bbox'] = (40, 80, 400, 96)
+        made = self.paragraph([padded], links=[{
+            'from': [40, 80, 400, 96], 'uri': 'https://example.com/a'}])
+        self.assertEqual('⟦1⟧ Dedication ⟦/1⟧', made['text'])
+
+    def test_link_ink_ignores_trailing_space(self):
+        spans = [{
+            'text': 'İthaf   ', 'size': 12, 'bbox': (40, 80, 200, 94),
+            'chars': [
+                {'c': 'İ', 'bbox': (40, 80, 48, 94)},
+                {'c': 'f', 'bbox': (52, 80, 58, 94)},
+                {'c': ' ', 'bbox': (58, 80, 200, 94)}]}]
+        self.assertEqual([[40, 80, 58, 94]], _ink_rects(spans, 12))
+        spans[0]['chars'] = [
+            {'c': 'A', 'bbox': (40, 80, 50, 94)},
+            {'c': ' ', 'bbox': (50, 80, 140, 94)},
+            {'c': 'B', 'bbox': (140, 80, 150, 94)}]
+        self.assertEqual(
+            [[40, 80, 50, 94], [140, 80, 150, 94]], _ink_rects(spans, 12))
+        spans[0]['chars'] = [
+            {'c': 'E', 'bbox': (78, 190, 88, 205)},
+            {'c': 'r', 'bbox': (170, 190, 180, 205)},
+            {'c': 'B', 'bbox': (78, 206, 88, 221)}]
+        self.assertEqual(
+            [[78, 190, 88, 205], [170, 190, 180, 205], [78, 206, 88, 221]],
+            _ink_rects(spans, 11))
 
     def test_link_on_its_own_words(self):
         linked = span('share', color=0x008000, flags=4)
@@ -418,6 +453,19 @@ class TestMakeParagraph(unittest.TestCase):
         lines = get_lines(block(
             line('a', 40, 100, 370), line('b', 40, 112, 380),
             line('c', 40, 124, 300)))
+        self.assertEqual('left', make_paragraph(0, lines)['style']['align'])
+
+    def test_short_stacked_lines_are_not_justified(self):
+        lines = get_lines(block(
+            line('Also by E. Lockhart', 78, 100, 193, size=11),
+            line('Title Page', 78, 116, 150, size=11)))
+        self.assertEqual('left', make_paragraph(0, lines)['style']['align'])
+
+    def test_wrapped_sentence_is_not_justified(self):
+        lines = get_lines(block(
+            line('Educators and librarians, for a variety of teaching '
+                 'tools, visit us at', 77, 324, 456, size=11),
+            line('RHTeachersLibrarians.com', 77, 338, 233, size=11)))
         self.assertEqual('left', make_paragraph(0, lines)['style']['align'])
 
     def test_single_line(self):
@@ -1095,6 +1143,52 @@ class TestPdfLayout(unittest.TestCase):
             link_box = links[0]['from']
             self.assertLess(link_box.x0, colored[0]['bbox'][2])
             self.assertGreater(link_box.x1, colored[0]['bbox'][0])
+
+    def test_link_underline_follows_the_words(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=595)
+        css = '* {font-family: Times; font-size: 14pt; color: #000000}'
+        page.insert_htmlbox(
+            pymupdf.Rect(40, 40, 380, 80),
+            '<div>Visit <span style="color:#4c7aa9">GetUnderlined.com</span>'
+            ' today.</div>', css=css, scale_low=1)
+        span = next(
+            item for block in page.get_text('dict')['blocks']
+            for line in block.get('lines', []) for item in line['spans']
+            if 'GetUnderlined.com' in item['text'])
+        box = pymupdf.Rect(span['bbox'])
+        page.insert_link({
+            'kind': pymupdf.LINK_URI, 'from': box,
+            'uri': 'http://getunderlined.com/'})
+        page.draw_rect(
+            pymupdf.Rect(box.x0, box.y1 - 1.9, box.x1, box.y1 - 1.15),
+            fill=(0.298, 0.478, 0.663), color=None, width=0)
+        old_width = box.x1 - box.x0
+        document.save(self.source)
+        document.close()
+        elements = [item for item in get_pdf_elements(self.source)
+                    if not item.ignored]
+        text = elements[0].get_text()
+        elements[0].add_translation(text.replace('GetUnderlined.com', 'Site'))
+        compose_pdf(self.source, self.output, elements, 'only')
+        with pymupdf.open(self.output) as result:
+            letters = []
+            for block in result[0].get_text('rawdict')['blocks']:
+                for line in block.get('lines', []):
+                    for item in line.get('spans', []):
+                        chars = item.get('chars') or []
+                        text = ''.join(char.get('c', '') for char in chars)
+                        if 'Site' not in text:
+                            continue
+                        index = text.index('Site')
+                        letters = chars[index:index + 4]
+            bars = [
+                drawing['rect'] for drawing in result[0].get_drawings()
+                if drawing['rect'].width >= 8 and drawing['rect'].height <= 2]
+            self.assertEqual(1, len(bars), bars)
+            self.assertLess(bars[0].width, old_width - 20)
+            self.assertAlmostEqual(bars[0].x0, letters[0]['bbox'][0], delta=1)
+            self.assertAlmostEqual(bars[0].x1, letters[-1]['bbox'][2], delta=1)
 
     def test_write_part_color(self):
         scale, page = self.write('Renkli', translation_color='#ff0000')
