@@ -687,13 +687,24 @@ def overlaps(a, b, axis):
     return a[axis] < b[axis + 2] and a[axis + 2] > b[axis]
 
 
+def _encloses(outer, inner):
+    """Whether a picture covers the paragraph, as a page background does."""
+    return outer[0] <= inner[0] + 1 and outer[1] <= inner[1] + 1 \
+        and outer[2] >= inner[2] - 1 and outer[3] >= inner[3] - 1
+
+
 def is_broken_off(head, tail, rules):
     """Whether MuPDF broke a paragraph apart: the rest starts right below,
     in the same column, with no rule between.
+
+    A line box is often taller than the distance to the next baseline, so
+    the tail can begin slightly above the head's bottom.
     """
     a, b = head['rect'], tail['rect']
+    size = head['style']['size']
+    step = b[1] - head['lines'][-1][1]
     if not can_continue(head, tail) or not overlaps(a, b, 0) \
-            or not -1 < b[1] - a[3] < 0.5 * head['style']['size']:
+            or not 0.4 * size < step < 2.0 * size:
         return False
     return not any(
         overlaps(rule, b, 0)
@@ -707,7 +718,9 @@ def set_frames(paragraphs, obstacles, bottom):
     boxes = [paragraph['rect'] for paragraph in paragraphs] + obstacles
     for paragraph in paragraphs:
         rect, style = paragraph['rect'], paragraph['style']
-        others = [box for box in boxes if box is not rect]
+        others = [
+            box for box in boxes
+            if box is not rect and not _encloses(box, rect)]
         x0, y0, x1, y1 = rect
         if len(paragraph['lines']) == 1:
             column = [box for box in others if overlaps(box, rect, 0)]
@@ -726,9 +739,14 @@ def set_frames(paragraphs, obstacles, bottom):
                 x0, x1 = min(x0, center - half), max(x1, center + half)
             else:
                 x1 = max(x1, right)
+        # The next line counts even when its box starts above this one.
+        # Comparing tops misses it whenever the font box is taller than
+        # the line pitch, and the frame is then painted over that line.
+        mid = (y0 + y1) / 2
         below = [
             box[1] for box in others
-            if box[0] < x1 and box[2] > x0 and box[1] >= y1 - 0.5]
+            if box[0] < x1 and box[2] > x0
+            and (box[1] + box[3]) / 2 > mid + 0.35 * style['size']]
         limit = min([bottom] + below) - 0.25 * style['size']
         paragraph['frame'] = [x0, y0, x1, max(y1, limit)]
 

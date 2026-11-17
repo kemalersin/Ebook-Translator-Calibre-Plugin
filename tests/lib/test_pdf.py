@@ -473,6 +473,20 @@ class TestSetFrames(unittest.TestCase):
         self.assertEqual('center', title['style']['align'])
         self.assertEqual([40, 100, 380], title['frame'][:3])
 
+    def test_overlapping_line_boxes_do_not_share_a_frame(self):
+        first = paragraph(
+            'They need', rect=(355, 165.3, 697, 233.9), size=18, lines=3)
+        second = paragraph(
+            'message', rect=(358, 230.1, 689, 255.5), size=18, lines=1)
+        set_frames([first, second], [[0, 0, 792, 484]], 580)
+        self.assertEqual(233.9, first['frame'][3])
+
+    def test_background_image_does_not_widen_a_line(self):
+        line = paragraph(
+            'They need', rect=(178, 232, 621, 258), size=18, lines=1)
+        set_frames([line], [[0, 0, 792, 612]], 580)
+        self.assertEqual([178, 232, 621], line['frame'][:3])
+
 
 class TestChainParagraphs(unittest.TestCase):
     def test_across_pages(self):
@@ -510,6 +524,26 @@ class TestChainParagraphs(unittest.TestCase):
         self.assertEqual([40, 90, 380, 126.5], paragraphs[0]['rect'])
         self.assertEqual(3, len(get_page_paragraphs(
             0, data, [[40, 114.5, 380, 115]])))
+
+    def test_broken_off_when_line_boxes_overlap(self):
+        # The chores book: each line box is taller than the line pitch, so
+        # the next line starts above the previous line's bottom.
+        data = {'blocks': [
+            block(line('They need to be done and depending on',
+                       359, 183, 694, size=18),
+                  line('your outlook can be accomplished easily.',
+                       356, 205, 697, size=18),
+                  line('Doing My Chores is intended to impart a',
+                       355, 226, 697, size=18)),
+            block(line('message of importance in accomplishing',
+                       358, 248, 689, size=18)),
+            block(line("one's given tasks.", 447, 270, 611, size=18))]}
+        paragraphs = get_page_paragraphs(0, data)
+        self.assertEqual(
+            ['They need to be done and depending on your outlook can be '
+             'accomplished easily. Doing My Chores is intended to impart a '
+             "message of importance in accomplishing one's given tasks."],
+            [item['text'] for item in paragraphs])
 
     def test_not_continued(self):
         cases = [

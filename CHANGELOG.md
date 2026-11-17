@@ -1,3 +1,9 @@
+## v2.4.6
+
+1. fix: A paragraph frame no longer runs through the next line when the line boxes overlap. The continuation is kept in the same paragraph, and the translation uses the free space below it instead of being written on top of the following line. A full-page picture no longer widens a single line to the page edge.
+
+---
+
 ## v2.4.5
 
 1. fix: An inline marker that does not belong to the paragraph no longer aborts PDF output. A merged translation can carry a marker such as `⟦1254⟧` from another paragraph; that marker is skipped and the paragraph is still written.
