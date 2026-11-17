@@ -1,3 +1,9 @@
+## v2.4.5
+
+1. fix: An inline marker that does not belong to the paragraph no longer aborts PDF output. A merged translation can carry a marker such as `⟦1254⟧` from another paragraph; that marker is skipped and the paragraph is still written.
+
+---
+
 ## v2.4.4
 
 1. feat: Translate a PDF in place so the output keeps the original page layout. The path stays off unless `pdf_layout.enabled` is on, and it runs only when both the input and the output are PDF. PyMuPDF is installed into the Calibre configuration folder when it is missing.

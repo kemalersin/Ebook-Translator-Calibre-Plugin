@@ -1049,16 +1049,21 @@ def _link_phrases(text, runs):
     runs = {int(number): run for number, run in (runs or {}).items()}
     active, buffers, order = [], {}, []
     for kind, value in _marker_tokens(text, runs):
+        if kind == 'text':
+            for number in active:
+                buffers[number].append(value)
+            continue
+        # A merged or altered translation can carry a marker this paragraph
+        # never produced. It has no link to place.
+        if value not in runs:
+            continue
         if kind == 'open':
             active.append(value)
             if value not in buffers:
                 buffers[value] = []
                 order.append(value)
-        elif kind == 'close':
-            active = [number for number in active if number != value]
         else:
-            for number in active:
-                buffers[number].append(value)
+            active = [number for number in active if number != value]
     phrases = []
     for number in order:
         run = runs[number]
@@ -1109,8 +1114,10 @@ def place_run_links(page, box, text, runs):
     Returns the original rectangles that were successfully replaced.
     """
     pymupdf = require_pymupdf()
+    # Glyphs can extend a fraction outside the box they were written into.
+    clip = (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2)
     spans = [
-        span for block in page.get_text('dict', clip=box)['blocks']
+        span for block in page.get_text('dict', clip=clip)['blocks']
         for line in block.get('lines', []) for span in line.get('spans', [])]
     start, replaced = 0, set()
     for run, phrase in _link_phrases(text, runs):

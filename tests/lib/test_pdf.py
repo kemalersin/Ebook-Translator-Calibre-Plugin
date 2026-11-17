@@ -21,7 +21,7 @@ from ...lib.pdf import (
     get_installed_version, load_pymupdf, is_pdf_layout, PdfElement,
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
     mark_lines, LIST_ITEM, render_markup, font_variants,
-    pdf_prompt_extension)
+    pdf_prompt_extension, _link_phrases)
 from ...engines.base import Base
 
 
@@ -145,6 +145,13 @@ class TestMarkers(unittest.TestCase):
     def test_render_drops_unknown_markers(self):
         self.assertEqual(
             'Please share.', render_markup('Please ⟦9⟧ share ⟦/9⟧.', {}))
+
+    def test_unknown_marker_is_not_a_link(self):
+        run = {1: {'color': '#008000', 'bold': False, 'italic': False,
+                   'uri': 'https://example.com/donate'}}
+        phrases = _link_phrases(
+            '⟦1254⟧ yabancı ⟦/1254⟧ ⟦1⟧ paylaşın ⟦/1⟧', run)
+        self.assertEqual([(run[1], 'paylaşın')], phrases)
 
     def test_render_run_split_across_parts(self):
         run = {1: {'color': '#008000', 'bold': False, 'italic': True}}
@@ -953,6 +960,26 @@ class TestPdfLayout(unittest.TestCase):
             setattr(element, name, value)
         scale = write_part(page, part, text, element, kwargs.get('font'))
         return scale, page
+
+    def test_write_part_ignores_unknown_marker(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=595)
+        part = paragraph('x', rect=(40, 40, 380, 90), lines=1)
+        element = PdfElement([part])
+        element.runs = {1: {
+            'color': '#008000', 'bold': True, 'italic': False,
+            'uri': 'https://example.com/donate', 'from': [40, 40, 120, 55]}}
+        write_part(
+            page, part,
+            'Lütfen ⟦1254⟧ kitapları ⟦/1254⟧ ⟦1⟧ paylaşın ⟦/1⟧', element)
+        document.save(self.output)
+        document.close()
+        with pymupdf.open(self.output) as saved:
+            self.assertIn('paylaşın', saved[0].get_text())
+            self.assertNotIn('⟦', saved[0].get_text())
+            self.assertEqual(
+                ['https://example.com/donate'],
+                [link.get('uri') for link in saved[0].get_links()])
 
     def test_write_part_fits(self):
         scale, page = self.write('Kısa metin')
