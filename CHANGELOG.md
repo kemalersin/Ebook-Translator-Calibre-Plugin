@@ -1,3 +1,16 @@
+## v2.4.8
+
+1. fix: A word printed twice for a fake bold is read once, so the heading is translated as the word on the page.
+2. fix: A stored paragraph is replaced when its text changes. The translation follows the current extraction instead of an older one that no longer matches the page.
+3. fix: Text keeps the color it was extracted with. The translation-color setting no longer turns light text black on a colored band.
+4. fix: Cells in a borderless shaded table, and columns separated by a wide gap, stay separate. A running header on one row stays apart from the title beside it, and a short footnote beside a totals block stays with its paragraph.
+5. fix: A contents row keeps its page number and its dot leader. Only the label is translated, and the row does not grow into the next one.
+6. fix: Text flows down the free side of a picture and continues underneath it at the same line spacing. A fill the letters sit on stays a background.
+7. fix: The tail of a hyphenated word stays with its paragraph, and a raised note number is written back as a superscript.
+8. change: In-place PDF translations use the cache suffix `pdf-layout-v2`.
+
+---
+
 ## v2.4.7
 
 1. fix: Two short lines, and a long line followed by a short one, are no longer treated as justified. The translation is no longer stretched until the gaps swallow the line.

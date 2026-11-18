@@ -1,6 +1,9 @@
+import os
+import shutil
+import tempfile
 import unittest
 
-from ...lib.cache import Paragraph
+from ...lib.cache import Paragraph, TranslationCache
 
 
 class TestParagraph(unittest.TestCase):
@@ -75,3 +78,39 @@ class TestParagraph(unittest.TestCase):
         self.paragraph.translation = 'A\n\nB\nC'
         self.paragraph.do_aligment('\n\n')
         self.assertEqual('A\n\nB\n\nC', self.paragraph.translation)
+
+
+class TestCacheSave(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.paths = (
+            TranslationCache.dir_path, TranslationCache.cache_path,
+            TranslationCache.temp_path)
+        TranslationCache.dir_path = self.directory
+        TranslationCache.cache_path = os.path.join(self.directory, 'cache')
+        TranslationCache.temp_path = os.path.join(self.directory, 'temp')
+        os.makedirs(TranslationCache.cache_path)
+        self.cache = TranslationCache('heading', True)
+
+    def tearDown(self):
+        self.cache.destroy()
+        (
+            TranslationCache.dir_path, TranslationCache.cache_path,
+            TranslationCache.temp_path) = self.paths
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def test_changed_paragraph_is_translated_again(self):
+        self.cache.save([(0, 'old', '<old>', 'In Invvoic oicee', False)])
+        self.cache.update(0, translation='Fatura Fiyatı')
+
+        self.cache.save([(0, 'old', '<old>', 'In Invvoic oicee', False)])
+        self.assertEqual(
+            'Fatura Fiyatı', self.cache.paragraph(0).translation)
+
+        self.cache.save([(0, 'new', '<new>', 'Invoice', False)])
+        stored = self.cache.paragraph(0)
+        self.assertEqual('Invoice', stored.original)
+        self.assertIsNone(stored.translation)
+
+        self.cache.save([(1, 'other', '<other>', 'Total', False)])
+        self.assertIsNone(self.cache.first(id=0))

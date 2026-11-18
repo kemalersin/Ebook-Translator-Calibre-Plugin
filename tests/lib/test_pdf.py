@@ -20,8 +20,9 @@ from ...lib.pdf import (
     chain_paragraphs, split_translation, find_wheel, install_pymupdf,
     get_installed_version, load_pymupdf, is_pdf_layout, PdfElement,
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
-    mark_lines, LIST_ITEM, render_markup, font_variants,
-    pdf_prompt_extension, _link_phrases, _ink_rects)
+    mark_lines, column_separators, LIST_ITEM, render_markup, font_variants,
+    pdf_prompt_extension, _link_phrases, _ink_rects, _fold_hyphen_tails,
+    _attach_wraps)
 from ...engines.base import Base
 
 
@@ -117,7 +118,8 @@ class TestMarkers(unittest.TestCase):
         linked['bbox'] = (40, 80, 400, 96)
         made = self.paragraph([linked], links=[{
             'from': [40, 80, 400, 96], 'page': 3}])
-        self.assertEqual('⟦1⟧ Chapter 1 12 ⟦/1⟧', made['text'])
+        self.assertEqual('⟦1⟧ Chapter 1 ⟦/1⟧', made['text'])
+        self.assertEqual('12', made['trailer']['text'])
         self.assertEqual(3, made['runs'][1]['page'])
         padded = span('Dedication          ')
         padded['bbox'] = (40, 80, 400, 96)
@@ -171,6 +173,10 @@ class TestMarkers(unittest.TestCase):
                  'uri': 'https://example.com/a&b'}})
         self.assertNotIn('⟦', markup)
         self.assertIn('>share our books<', markup)
+        noted = render_markup('Dipnotlar⟦^1⟧ okunur⟦^2⟧.', None)
+        self.assertIn('<sup>1</sup>', noted)
+        self.assertIn('<sup>2</sup>', noted)
+        self.assertNotIn('⟦', noted)
         self.assertIn('color:#008000', markup)
         self.assertIn('font-weight:bold', markup)
         self.assertNotIn('<a', markup)
@@ -230,6 +236,25 @@ class TestGetLines(unittest.TestCase):
         self.assertEqual('Hello world', lines[0]['text'])
         self.assertEqual(2, len(lines[0]['spans']))
 
+    def test_overprinted_bold_is_one_word(self):
+        def glyph(char, x0, x1):
+            return {'c': char, 'bbox': (x0, 57, x1, 94), 'origin': (x0, 88)}
+
+        first = line('InInvoic', 56, 88, 128, size=30)
+        first['spans'][0]['chars'] = [
+            glyph('I', 56.7, 65.2), glyph('n', 65.2, 81.1),
+            glyph('I', 57.4, 65.9), glyph('n', 65.9, 81.8),
+            glyph('v', 80.7, 93.8), glyph('o', 93.4, 108.7),
+            glyph('i', 108.7, 116.7), glyph('c', 116.7, 128.3)]
+        first['spans'][0]['bbox'] = (56.7, 57, 128.3, 94)
+        second = line('oice', 94, 88, 143, size=30)
+        second['spans'][0]['chars'] = [
+            glyph('o', 94.1, 109.4), glyph('i', 109.4, 117.3),
+            glyph('c', 117.3, 129.0), glyph('e', 128.2, 142.6)]
+        second['spans'][0]['bbox'] = (94.1, 57, 142.6, 94)
+        lines = get_lines(block(first, second))
+        self.assertEqual(['Invoice'], [item['text'] for item in lines])
+
     def test_merge_lines_on_same_baseline(self):
         lines = get_lines(block(
             line('Left', 0, 10, 30), line('right', 36, 10, 90)))
@@ -277,6 +302,40 @@ class TestGetLines(unittest.TestCase):
 class TestSplitBlock(unittest.TestCase):
     def split(self, *lines):
         return texts(split_block(get_lines(block(*lines))))
+
+    def test_leader_rows_are_not_one_paragraph(self):
+        groups = split_block(get_lines(block(
+            line('Hyphenation...................1', 40, 100, 220),
+            line('Rounded borders ............2', 40, 114, 220))))
+        self.assertEqual(2, len(groups))
+        made = [
+            make_paragraph(0, group) for group in groups]
+        self.assertEqual(
+            ['Hyphenation', 'Rounded borders'],
+            [item['text'] for item in made])
+        self.assertEqual(
+            ['1', '2'], [item['trailer']['text'] for item in made])
+
+    def test_raised_note_leaves_the_words(self):
+        body = span('Footnotes', size=11)
+        body.update(bbox=(96, 691, 138, 705), origin=(96, 703))
+        note = span('1', size=8)
+        note.update(bbox=(138, 688, 144, 698), origin=(138, 697))
+        rest = span(' are essential', size=11)
+        rest.update(bbox=(148, 691, 340, 705), origin=(148, 703))
+        made = make_paragraph(0, [{
+            'dir': (1, 0), 'bbox': (96, 688, 340, 705), 'baseline': 703,
+            'text': 'Footnotes1 are essential', 'item': False,
+            'spans': [body, note, rest]}])
+        self.assertEqual('Footnotes are essential', made['text'])
+        self.assertEqual([(0, '1')], made['notes'])
+        glued = span('are essential', size=11)
+        glued.update(bbox=(148, 691, 340, 705), origin=(148, 703))
+        made = make_paragraph(0, [{
+            'dir': (1, 0), 'bbox': (96, 688, 340, 705), 'baseline': 703,
+            'text': 'Footnotes1are essential', 'item': False,
+            'spans': [body, note, glued]}])
+        self.assertEqual('Footnotes are essential', made['text'])
 
     def test_single_paragraph(self):
         self.assertEqual(['one two three'], self.split(
@@ -328,6 +387,25 @@ class TestSplitBlock(unittest.TestCase):
                 line('Name', 40, 100, 80), cells[0],
                 line('Billy Bones', 40, 112, 100), cells[1])))))
 
+    def test_footnote_beside_a_total_stays_together(self):
+        total = line('Total', 300, 100, 350, size=15)
+        total['cell'] = True
+        amount = line('$39.60', 420, 101, 490, size=15)
+        amount['cell'] = True
+        note = [
+            line('* Lorem ipsum dolor sit amet, consectetur adipiscing.',
+                 20, 100, 280, size=9),
+            line('dapibus fermentum. Nunc adipiscing, magna sed cursus.',
+                 20, 110, 270, size=9),
+            line('lectus dapibus urna, sed facilisis leo dui et ipsum.',
+                 20, 120, 250, size=9)]
+        self.assertEqual([
+            'Total', '$39.60',
+            '* Lorem ipsum dolor sit amet, consectetur adipiscing. '
+            'dapibus fermentum. Nunc adipiscing, magna sed cursus. '
+            'lectus dapibus urna, sed facilisis leo dui et ipsum.'],
+            self.split(total, amount, *note))
+
     def test_list_items(self):
         second = line('Second item.', 40, 112, 110)
         second['item'] = True
@@ -375,6 +453,65 @@ class TestRules(unittest.TestCase):
         self.assertEqual(
             [False, False, True, False],
             [bool(item.get('item')) for item in lines])
+
+    def test_shaded_cells_are_columns(self):
+        drawings = [
+            {'rect': (40, 40, 150, 70), 'fill': (0.8, 0.6, 0.2)},
+            {'rect': (150, 40, 260, 70), 'fill': (0.8, 0.6, 0.2)},
+            {'rect': (260, 40, 370, 70), 'fill': (0.8, 0.6, 0.2)}]
+        data = {'blocks': [block(
+            line('Item', 48, 60, 90), line('Price', 170, 60, 220),
+            line('Apple', 48, 90, 95), line('$5', 180, 90, 210))]}
+        separators = column_separators(drawings, data, 420, 400)
+        mark_lines(None, data, [], [], 0, separators)
+        self.assertEqual(
+            ['Item', 'Price', 'Apple', '$5'],
+            [item['text'] for item in get_lines(data['blocks'][0])])
+
+    def test_aligned_gaps_are_columns(self):
+        data = {'blocks': [block(
+            line('Subtotal', 40, 40, 110), line('$36', 220, 40, 260),
+            line('GST', 40, 60, 80), line('$3', 230, 60, 260),
+            line('Total', 40, 80, 90), line('$39', 220, 80, 260))]}
+        separators = column_separators([], data, 420, 400)
+        mark_lines(None, data, [], [], 0, separators)
+        self.assertEqual(
+            ['Subtotal', '$36', 'GST', '$3', 'Total', '$39'],
+            [item['text'] for item in get_lines(data['blocks'][0])])
+
+    def test_running_header_stays_apart(self):
+        data = {'blocks': [block(
+            line('TRANSFER RULES', 40, 30, 210, size=9),
+            line('Page 1', 360, 30, 410, size=9))]}
+        separators = column_separators([], data, 500, 800)
+        mark_lines(None, data, [], [], 0, separators)
+        self.assertEqual(
+            ['TRANSFER RULES', 'Page 1'],
+            texts(split_block(get_lines(data['blocks'][0]))))
+
+    def test_one_wide_gap_is_not_a_column(self):
+        data = {'blocks': [block(
+            line('him', 0, 10, 20), line('down', 60, 10, 90))]}
+        self.assertEqual([], column_separators([], data, 420, 400))
+
+    def test_spans_split_across_a_column(self):
+        def cell(text, x0, x1, y=50):
+            item = span(text, x=x0, y=y)
+            item['bbox'] = (x0, y - 10, x1, y + 2)
+            return item
+
+        def row(y, left, right):
+            item = line('row', 40, y, 240)
+            item['spans'] = [cell(left, 40, 80, y), cell(right, 200, 240, y)]
+            item['bbox'] = (40, y - 10, 240, y + 2)
+            return item
+
+        data = {'blocks': [block(row(50, 'Apple', '$5'), row(80, 'Mango', '$9'))]}
+        separators = column_separators([], data, 420, 400)
+        mark_lines(None, data, [], [], 0, separators)
+        self.assertEqual(
+            ['Apple', '$5', 'Mango', '$9'],
+            [item['text'] for item in get_lines(data['blocks'][0])])
 
     def test_list_item_pattern(self):
         for text in ('• a', '- a', '* a', '1. a', '12) a', '(3) a', 'a) a',
@@ -644,6 +781,35 @@ class TestSplitTranslation(unittest.TestCase):
     def test_text_without_spaces(self):
         self.assertEqual(
             ['今日は', '晴れです'], split_translation('今日は晴れです', [3, 4]))
+
+    def test_hyphen_tail_stays_with_its_paragraph(self):
+        head = paragraph('read the footnotes before they are an-')
+        tail = paragraph('chored.', rect=(360, 200, 400, 216), lines=1)
+        tail['notes'] = [(0, '2')]
+        texts = _fold_hyphen_tails(
+            [head, tail], ['Dipnotları okumadan', 'okur.'])
+        self.assertEqual(['Dipnotları okumadan okur.', ''], texts)
+        self.assertEqual([('end', '2')], head['notes'])
+        sentence = paragraph('for demon-')
+        rest = paragraph(
+            'stration purposes; normally the colors would be close.',
+            rect=(40, 200, 340, 240), lines=1)
+        kept = _fold_hyphen_tails(
+            [sentence, rest], ['gösterim', 'amaçlıdır.'])
+        self.assertEqual(['gösterim', 'amaçlıdır.'], kept)
+
+    def test_wrap_figure_is_kept_off_the_letters(self):
+        paragraph_box = {
+            'rect': [360, 340, 600, 420],
+            'ink': [[420, 345, 600, 360], [360, 400, 600, 420]]}
+        background = {
+            'rect': [360, 340, 600, 370],
+            'ink': [[370, 345, 590, 365]]}
+        _attach_wraps(
+            [paragraph_box, background],
+            [[360, 344, 408, 392], [100, 100, 200, 160]])
+        self.assertEqual([[360, 344, 408, 392]], paragraph_box['avoid'])
+        self.assertNotIn('avoid', background)
 
 
 class TestPdfElement(unittest.TestCase):
@@ -966,6 +1132,31 @@ class TestPdfLayout(unittest.TestCase):
         self.assertEqual(12, second.element[0]['style']['indent'])
         self.assertEqual([0, 1], [part['page'] for part in second.element])
 
+    def test_borderless_table_keeps_columns(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=300)
+        for rect in ((40, 40, 150, 72), (150, 40, 270, 72), (270, 40, 390, 72)):
+            page.draw_rect(rect, color=None, fill=(0.86, 0.66, 0.28), width=0)
+        for x, y, text in (
+                (48, 64, 'Item'), (168, 64, 'Price'), (290, 64, 'Qty'),
+                (48, 96, 'Apple'), (178, 96, '$5.00'), (310, 96, '2')):
+            page.insert_text((x, y), text, fontsize=11, fontname='tiro')
+        document.save(self.source)
+        document.close()
+        ordered = sorted(
+            get_pdf_elements(self.source),
+            key=lambda element: (
+                element.element[0]['rect'][1], element.element[0]['rect'][0]))
+        self.assertEqual(
+            ['Item', 'Price', 'Qty', 'Apple', '$5.00', '2'],
+            [element.get_text() for element in ordered])
+        for previous, element in zip(ordered, ordered[1:]):
+            left, right = previous.element[0], element.element[0]
+            same_row = min(left['rect'][3], right['rect'][3]) \
+                - max(left['rect'][1], right['rect'][1]) > 2
+            if same_row:
+                self.assertLessEqual(left['frame'][2], right['rect'][0] + 0.5)
+
     def test_table_cells_joined_by_mupdf(self):
         document = pymupdf.open()
         page = document.new_page(width=420, height=595)
@@ -1073,6 +1264,37 @@ class TestPdfLayout(unittest.TestCase):
             'Bu çeviri özgün satırdan çok daha uzun bir metin',
             frame=[40, 40, 200, 100])
         self.assertEqual(1.0, scale)
+
+    def test_wrap_keeps_the_rest_under_the_picture(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=595)
+        figure = [100, 80, 190, 170]
+        part = paragraph('x', rect=(100, 80, 340, 280), lines=8)
+        part['avoid'] = [figure]
+        part['ink'] = [[200, 80, 340, 160], [100, 180, 340, 250]]
+        text = ' '.join('kelime%d' % number for number in range(1, 36))
+        write_part(page, part, text, PdfElement([part]))
+        words = page.get_text('words')
+        found = {word[4] for word in words}
+        for number in range(1, 36):
+            self.assertIn('kelime%d' % number, found)
+        for word in words:
+            box = word[:4]
+            self.assertFalse(
+                box[0] < figure[2] - 1 and box[2] > figure[0] + 1
+                and box[1] < figure[3] - 1 and box[3] > figure[1] + 1,
+                word)
+        tops = sorted(word[1] for word in words)
+        lines = [tops[0]]
+        for top in tops[1:]:
+            if top - lines[-1] > 3:
+                lines.append(top)
+        gaps = [b - a for a, b in zip(lines, lines[1:])]
+        self.assertGreater(len(lines), 4)
+        self.assertLess(max(gaps), min(gaps) * 1.45, gaps)
+        self.assertTrue(any(
+            word[0] >= figure[2] and word[3] <= figure[3] + 2 for word in words))
+        self.assertTrue(any(word[1] >= figure[3] - 2 for word in words))
 
     def test_write_part_shrinks_in_steps(self):
         text = 'Bu çeviri özgün satırdan biraz daha uzun'
@@ -1190,10 +1412,16 @@ class TestPdfLayout(unittest.TestCase):
             self.assertAlmostEqual(bars[0].x0, letters[0]['bbox'][0], delta=1)
             self.assertAlmostEqual(bars[0].x1, letters[-1]['bbox'][2], delta=1)
 
-    def test_write_part_color(self):
-        scale, page = self.write('Renkli', translation_color='#ff0000')
+    def test_write_part_keeps_original_color(self):
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=595)
+        part = paragraph('x', rect=(40, 40, 380, 90), lines=1)
+        part['style']['color'] = '#ffffff'
+        element = PdfElement([part])
+        element.translation_color = '#000000'
+        write_part(page, part, 'Beyaz başlık', element)
         spans = page.get_text('dict')['blocks'][0]['lines'][0]['spans']
-        self.assertEqual(0xff0000, spans[0]['color'])
+        self.assertEqual(0xffffff, spans[0]['color'])
 
     @unittest.skipUnless(
         os.path.isfile('C:/Windows/Fonts/arial.ttf'), 'Arial is missing.')

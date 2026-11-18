@@ -231,10 +231,28 @@ class TranslationCache:
         self.connection.commit()
 
     def save(self, original_group):
-        if self.is_fresh():
-            for original_unit in original_group:
-                self.add(*original_unit)
-            self.connection.commit()
+        """Store the paragraphs of this extraction.
+
+        A paragraph that was stored before keeps its translation while its
+        text is unchanged. When the extraction changes, the old text would
+        no longer match the paragraph on the page, and that paragraph would
+        be left untranslated. The stored row is replaced and translated again.
+        """
+        if not original_group:
+            return
+        existing = {
+            row[0]: row[1] for row in self.cursor.execute(
+                'SELECT id, md5 FROM cache')}
+        incoming = {unit[0]: unit for unit in original_group}
+        remove = [
+            item_id for item_id, digest in existing.items()
+            if item_id not in incoming or incoming[item_id][1] != digest]
+        if remove:
+            self.delete(remove)
+        for item_id, unit in incoming.items():
+            if existing.get(item_id) != unit[1]:
+                self.add(*unit)
+        self.connection.commit()
 
     def all(self):
         resource = self.cursor.execute('SELECT * FROM cache WHERE NOT ignored')
