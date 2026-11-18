@@ -1642,6 +1642,11 @@ def get_pdf_elements(path, encoding=None):
             data = page.get_text('rawdict', flags=flags)
             drawings = page.get_drawings()
             rules, marks = get_rules(drawings)
+            # rawdict keeps the letters on the glyphs. The column finder
+            # reads span text, so a repeated gap is invisible until the
+            # letters are joined.
+            for block in data.get('blocks') or []:
+                _ensure_span_text(block)
             separators = column_separators(
                 drawings, data, page.rect.width, page.rect.height)
             mark_lines(page, data, rules, marks, flags, separators)

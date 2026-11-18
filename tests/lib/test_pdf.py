@@ -22,7 +22,7 @@ from ...lib.pdf import (
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
     mark_lines, column_separators, LIST_ITEM, render_markup, font_variants,
     pdf_prompt_extension, _link_phrases, _ink_rects, _fold_hyphen_tails,
-    _attach_wraps)
+    _attach_wraps, _ensure_span_text)
 from ...engines.base import Base
 
 
@@ -488,6 +488,42 @@ class TestRules(unittest.TestCase):
         self.assertEqual(
             ['TRANSFER RULES', 'Page 1'],
             texts(split_block(get_lines(data['blocks'][0]))))
+
+    def test_repeated_gap_is_read_from_glyphs(self):
+        def piece(text, x0, x1, y):
+            item = span(text, size=15, x=x0, y=y)
+            item['bbox'] = (x0, y - 12, x1, y + 4)
+            width = max(x1 - x0, 1) / max(len(text), 1)
+            item['chars'] = []
+            for index, char in enumerate(text):
+                cx0 = x0 + index * width
+                item['chars'].append({
+                    'c': char,
+                    'bbox': (cx0, y - 12, cx0 + width * 0.8, y + 4)})
+            del item['text']
+            return item
+
+        def row(y, left, right):
+            item = line(left, 75, y, 270, size=15)
+            gap = piece(' ' * 12, 137, 182, y)
+            item['spans'] = [
+                piece(left, 75, 136, y), gap, piece(right, 182, 270, y)]
+            item['bbox'] = (75, y - 12, 270, y + 4)
+            return item
+
+        data = {'blocks': [block(
+            row(100, 'Chapter 1', 'What I Believe'),
+            row(118, 'Chapter 2', 'What Is the Problem?'),
+            row(136, 'Chapter 3', 'Where Does It Come From?'))]}
+        for item in data['blocks']:
+            _ensure_span_text(item)
+        separators = column_separators([], data, 612, 792)
+        mark_lines(None, data, [], [], 0, separators)
+        self.assertEqual(
+            ['Chapter 1', 'What I Believe',
+             'Chapter 2', 'What Is the Problem?',
+             'Chapter 3', 'Where Does It Come From?'],
+            [line['text'] for line in get_lines(data['blocks'][0])])
 
     def test_one_wide_gap_is_not_a_column(self):
         data = {'blocks': [block(

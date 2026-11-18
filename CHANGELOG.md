@@ -1,3 +1,9 @@
+## v2.4.9
+
+1. fix: A chapter label and the title beside it on the same contents line stay separate entries. The repeated gap between them is read from the glyphs. A single wide gap in justified text still stays one sentence.
+
+---
+
 ## v2.4.8
 
 1. fix: A word printed twice for a fake bold is read once, so the heading is translated as the word on the page.
