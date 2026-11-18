@@ -22,7 +22,7 @@ from ...lib.pdf import (
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
     mark_lines, column_separators, LIST_ITEM, render_markup, font_variants,
     pdf_prompt_extension, _link_phrases, _ink_rects, _fold_hyphen_tails,
-    _attach_wraps, _ensure_span_text)
+    _attach_wraps, _ensure_span_text, _coalesce_boxes)
 from ...engines.base import Base
 
 
@@ -488,6 +488,15 @@ class TestRules(unittest.TestCase):
         self.assertEqual(
             ['TRANSFER RULES', 'Page 1'],
             texts(split_block(get_lines(data['blocks'][0]))))
+
+    def test_stacked_redaction_boxes_become_one(self):
+        self.assertEqual(
+            [[10, 10, 100, 40]],
+            _coalesce_boxes([[10, 10, 100, 22], [12, 24, 80, 40]]))
+
+    def test_side_by_side_boxes_stay_apart(self):
+        self.assertEqual(
+            2, len(_coalesce_boxes([[10, 10, 40, 24], [80, 10, 140, 24]])))
 
     def test_repeated_gap_is_read_from_glyphs(self):
         def piece(text, x0, x1, y):

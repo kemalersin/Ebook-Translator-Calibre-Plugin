@@ -1979,8 +1979,8 @@ def _phrase_rect(spans, phrase, start):
     return [], start
 
 
-def _link_exists(page, rect, uri=None, page_number=None):
-    for link in page.get_links():
+def _link_exists(links, rect, uri=None, page_number=None):
+    for link in links:
         if not overlaps(link['from'], rect, 0) \
                 or not overlaps(link['from'], rect, 1):
             continue
@@ -2055,17 +2055,111 @@ def _bar_on_ink(bar, ink):
     return [ink[0], bottom - height, ink[2], bottom]
 
 
-def place_run_links(page, box, text, runs, bars=()):
+def _spans_touching(spans, clip):
+    """Spans from one page read, limited to the characters inside ``clip``."""
+    chosen = []
+    for span in spans:
+        chars = [
+            char for char in span.get('chars') or []
+            if char.get('bbox') and overlaps(char['bbox'], clip, 0)
+            and overlaps(char['bbox'], clip, 1)]
+        if chars:
+            copy = dict(span)
+            copy['chars'] = chars
+            copy.pop('text', None)
+            chosen.append(copy)
+            continue
+        if span.get('text', '').strip() and span.get('bbox') \
+                and overlaps(span['bbox'], clip, 0) \
+                and overlaps(span['bbox'], clip, 1):
+            chosen.append(span)
+    return chosen
+
+
+def _finish_links(page, part, box, text, runs, bars, link_queue):
+    """Record a link to place after the page is written, or place it now.
+
+    Placing it now reads the page. A queue lets the whole page be read once.
+    """
+    if link_queue is None:
+        part['replaced_links'] = place_run_links(page, box, text, runs, bars)
+        return
+    if _link_phrases(text, runs):
+        link_queue.append((part, box, text, runs))
+    else:
+        part['replaced_links'] = set()
+
+
+def _commit_links(page, queue, bars):
+    """Place every queued link from a single reading of the page."""
+    if not queue:
+        return
+    spans = [
+        span
+        for block in page.get_text('rawdict')['blocks']
+        for line in block.get('lines') or []
+        for span in line.get('spans') or []]
+    live = page.get_links()
+    for part, box, text, runs in queue:
+        clip = (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2)
+        part['replaced_links'] = place_run_links(
+            page, box, text, runs, bars,
+            spans=_spans_touching(spans, clip), links=live)
+
+
+def _coalesce_boxes(boxes):
+    """Join stacked line boxes that already cover one column of text.
+
+    A box beside another, or one separated by a picture, stays on its own,
+    so the gap between them is not erased.
+    """
+    pending = [list(box) for box in boxes]
+    if len(pending) < 2:
+        return pending
+    parent = list(range(len(pending)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def stacked(a, b):
+        gap = max(a[1], b[1]) - min(a[3], b[3])
+        if gap < 0:
+            gap = 0
+        overlap = min(a[2], b[2]) - max(a[0], b[0])
+        narrow = min(a[2] - a[0], b[2] - b[0])
+        height = max(a[3] - a[1], b[3] - b[1], 1)
+        return gap <= max(4, 0.75 * height) and narrow > 0 \
+            and overlap >= 0.55 * narrow
+
+    for i, box in enumerate(pending):
+        for j in range(i + 1, len(pending)):
+            if stacked(box, pending[j]):
+                parent[find(i)] = find(j)
+    groups = {}
+    for index, box in enumerate(pending):
+        groups.setdefault(find(index), []).append(box)
+    return [_union_box(group) for group in groups.values()]
+
+
+def place_run_links(page, box, text, runs, bars=(), spans=None, links=None):
     """Put each linked run's link on the words it was translated into.
 
     Returns the original rectangles that were successfully replaced.
+    ``spans`` and ``links`` skip a fresh reading of the page when the caller
+    already has one.
     """
     pymupdf = require_pymupdf()
-    # Glyphs can extend a fraction outside the box they were written into.
-    clip = (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2)
-    spans = [
-        span for block in page.get_text('rawdict', clip=clip)['blocks']
-        for line in block.get('lines', []) for span in line.get('spans', [])]
+    if spans is None:
+        # Glyphs can extend a fraction outside the box they were written into.
+        clip = (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2)
+        spans = [
+            span for block in page.get_text('rawdict', clip=clip)['blocks']
+            for line in block.get('lines', []) for span in line.get('spans', [])]
+    if links is None:
+        links = page.get_links()
     start, replaced = 0, set()
     bars_of = {bar['link']: bar for bar in bars}
     for run, phrase in _link_phrases(text, runs):
@@ -2073,17 +2167,19 @@ def place_run_links(page, box, text, runs, bars=()):
         if not rects:
             continue
         for rect in rects:
-            if run.get('uri') and not _link_exists(page, rect, uri=run['uri']):
+            if run.get('uri') and not _link_exists(links, rect, uri=run['uri']):
                 page.insert_link({
                     'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(rect),
                     'uri': run['uri']})
+                links.append({'from': rect, 'uri': run['uri']})
             elif run.get('page') is not None and not _link_exists(
-                    page, rect, page_number=run['page']):
+                    links, rect, page_number=run['page']):
                 destination = run.get('to') or (rect[0], rect[1])
                 page.insert_link({
                     'kind': pymupdf.LINK_GOTO, 'from': pymupdf.Rect(rect),
                     'page': run['page'],
                     'to': pymupdf.Point(destination[0], destination[1])})
+                links.append({'from': rect, 'page': run['page']})
         if run.get('from'):
             key = tuple(round(float(v), 1) for v in run['from'])
             replaced.add(key)
@@ -2226,9 +2322,10 @@ def _flow_slices(
     return css, slices, index >= len(words), overflow
 
 
-def _write_leader(page, part, text, markup, style, font, archive, bars, element):
+def _write_leader(
+        page, part, text, markup, style, font, archive, bars, element,
+        link_queue=None):
     """Write a contents label, then the dots, then the original page number."""
-    pymupdf = require_pymupdf()
     rect = part['rect']
     trailer = part.get('trailer') or {}
     box = trailer.get('box')
@@ -2241,8 +2338,10 @@ def _write_leader(page, part, text, markup, style, font, archive, bars, element)
     used = None
     for scale in FONT_SCALES + FALLBACK_SCALES:
         css = get_css(style, scale, font)
-        if fits(pymupdf, label, markup, css, archive):
-            _write_into(page, label, markup, css, archive)
+        # scale_low=1 draws only when the line fits, so the trial is the draw.
+        spare, _drawn = page.insert_htmlbox(
+            label, markup, css=css, scale_low=1, archive=archive)
+        if spare >= 0:
             used = scale
             break
     if used is None:
@@ -2254,8 +2353,9 @@ def _write_leader(page, part, text, markup, style, font, archive, bars, element)
     baseline = (box[3] - 0.15 * size) if box else rect[3] - 0.2 * size
     _draw_leader(page, gap0, gap1, baseline, style, used)
     _draw_trailer(page, trailer, style, used)
-    part['replaced_links'] = place_run_links(
-        page, label, text, getattr(element, 'runs', None), bars)
+    _finish_links(
+        page, part, label, text, getattr(element, 'runs', None), bars,
+        link_queue)
     return used
 
 
@@ -2278,7 +2378,7 @@ def _beside_box(rect, figure, ink):
 
 def _write_around(
         page, part, text, style, font, archive, bars, element, runs,
-        direction):
+        direction, link_queue=None):
     """Flow a paragraph down the side of a picture, then underneath it.
 
     The picture is already on the page. The new words use the rectangles
@@ -2321,16 +2421,15 @@ def _write_around(
             scale_low=low)
         placed.append(box)
     box = _union_box(placed) if placed else rect
-    part['replaced_links'] = place_run_links(page, box, text, runs, bars)
+    _finish_links(page, part, box, text, runs, bars, link_queue)
     return scale
 
 
-def write_part(page, part, text, element, font=None, bars=()):
+def write_part(page, part, text, element, font=None, bars=(), link_queue=None):
     """Write a translation into the area of its original. A smaller font is
     used only when it fits neither the original area nor the free space.
     Return the scale of the font.
     """
-    pymupdf = require_pymupdf()
     # Keep the original color. The colored bands stay on the page, so the
     # translation-color setting would turn white text black on top of them.
     style = dict(part['style'])
@@ -2342,11 +2441,12 @@ def write_part(page, part, text, element, font=None, bars=()):
     archive = font['archive'] if font else None
     if part.get('leader'):
         return _write_leader(
-            page, part, text, markup, style, font, archive, bars, element)
+            page, part, text, markup, style, font, archive, bars, element,
+            link_queue)
     if part.get('avoid'):
         return _write_around(
             page, part, text, style, font, archive, bars, element, runs,
-            direction)
+            direction, link_queue)
     # The original lines are as tall as their glyphs, while CSS puts half of
     # the line spacing above and below them. Make up for that, and for the
     # margin that Page.insert_htmlbox() adds.
@@ -2359,9 +2459,11 @@ def write_part(page, part, text, element, font=None, bars=()):
     used = None
     for box, scale in attempts:
         css = get_css(style, scale, font)
-        if fits(pymupdf, box, markup, css, archive):
-            page.insert_htmlbox(
-                box, markup, css=css, scale_low=1, archive=archive)
+        # One placement both decides and draws. A rejected size leaves the
+        # page untouched, so the next size can still be tried.
+        spare, _drawn = page.insert_htmlbox(
+            box, markup, css=css, scale_low=1, archive=archive)
+        if spare >= 0:
             used = (box, scale)
             break
     if used is None:
@@ -2370,8 +2472,7 @@ def write_part(page, part, text, element, font=None, bars=()):
             frame, markup, css=get_css(style, 1.0, font), scale_low=0,
             archive=archive)
         used = (frame, scale)
-    part['replaced_links'] = place_run_links(
-        page, used[0], text, getattr(element, 'runs', None), bars)
+    _finish_links(page, part, used[0], text, runs, bars, link_queue)
     return used[1]
 
 
@@ -2431,24 +2532,32 @@ def compose_pdf(
         links = page.get_links()
         line_boxes = [
             bbox for part, _text, _element in items for bbox in part['lines']]
-        bars = [
-            bar for bar in _link_bars(page.get_drawings(), links)
-            if any(overlaps(bar['rect'], bbox, 0)
-                   and overlaps(bar['rect'], bbox, 1) for bbox in line_boxes)]
+        # A page with no links has nothing to underline. Skip its drawings.
+        bars = []
+        if links:
+            bars = [
+                bar for bar in _link_bars(page.get_drawings(), links)
+                if any(overlaps(bar['rect'], bbox, 0)
+                       and overlaps(bar['rect'], bbox, 1)
+                       for bbox in line_boxes)]
         # Before the new glyphs are drawn: their boxes cover the old bar.
         _remove_drawings(page, [bar['rect'] for bar in bars])
-        for bbox in line_boxes:
-            page.add_redact_annot(bbox)
+        for part, _text, _element in items:
+            for bbox in _coalesce_boxes(part['lines']):
+                page.add_redact_annot(bbox)
         page.apply_redactions(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             text=pymupdf.PDF_REDACT_TEXT_REMOVE)
-        replaced = set()
+        queue = []
         for part, text, element in items:
             if text:
                 scales.append(write_part(
-                    page, part, text, element, font, bars))
-                replaced.update(part.get('replaced_links') or ())
+                    page, part, text, element, font, bars, queue))
+        _commit_links(page, queue, bars)
+        replaced = set()
+        for part, _text, _element in items:
+            replaced.update(part.get('replaced_links') or ())
         for bar in bars:
             if bar['link'] not in replaced:
                 _paint_bar(page, bar['rect'], bar['fill'])

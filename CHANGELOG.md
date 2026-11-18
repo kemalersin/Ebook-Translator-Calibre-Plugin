@@ -1,3 +1,9 @@
+## v2.4.10
+
+1. change: PDF output writes each paragraph in one placement, reads a page once when it restores links, and skips the drawing scan on a page that has none. Stacked lines are cleared together. Wrapping, color, links, underlines and leaders stay the same.
+
+---
+
 ## v2.4.9
 
 1. fix: A chapter label and the title beside it on the same contents line stay separate entries. The repeated gap between them is read from the glyphs. A single wide gap in justified text still stays one sentence.
