@@ -495,6 +495,191 @@ class TestPageElement(unittest.TestCase):
         self.assertEqual('<sup>[2]</sup>', element.reserve_elements[2])
         self.assertEqual('<sup>[3]</sup>', element.reserve_elements[3])
 
+    def _linked(self, markup):
+        xhtml = etree.XML(
+            ('<?xml version="1.0" encoding="utf-8"?>'
+             '<html xmlns="http://www.w3.org/1999/xhtml" lang="en">'
+             '<body>%s</body></html>' % markup).encode('utf-8'))
+        element = PageElement(xhtml.find('./x:body/*', namespaces=ns), 'p1')
+        element.reserve_pattern = create_xpath(('img', 'sup'))
+        element.placeholder = Base.placeholder
+        element.position = 'only'
+        return xhtml, element
+
+    def test_link_text_is_marked_and_restored(self):
+        xhtml, element = self._linked(
+            '<div class="contentsEntry">'
+            '<a href="chapter.html#N101EE">Chapter One</a></div>')
+        self.assertEqual('⟦1⟧ Chapter One ⟦/1⟧', element.get_content())
+        self.assertIn('href="chapter.html#N101EE"', element.links[1])
+        element.add_translation('⟦1⟧ Birinci Bölüm ⟦/1⟧')
+
+        translated = xhtml.find('.//x:div', namespaces=ns)
+        link = translated.find('.//x:a', namespaces=ns)
+        self.assertEqual('chapter.html#N101EE', link.get('href'))
+        self.assertEqual('Birinci Bölüm', link.text)
+        self.assertNotIn('⟦', get_string(translated))
+
+    def test_link_inside_a_sentence(self):
+        xhtml, element = self._linked(
+            '<p>Please <a href="http://example.com/?a=1&amp;b=2">'
+            'share our books</a> today.</p>')
+        self.assertEqual(
+            'Please ⟦1⟧ share our books ⟦/1⟧ today.', element.get_content())
+        element.add_translation(
+            'Lütfen ⟦1⟧ kitaplarımızı paylaşın ⟦/1⟧ bugün.')
+
+        link = xhtml.find('.//x:a', namespaces=ns)
+        self.assertEqual('http://example.com/?a=1&b=2', link.get('href'))
+        self.assertEqual('kitaplarımızı paylaşın', ''.join(link.itertext()))
+
+    def test_lost_marker_keeps_the_translation(self):
+        xhtml, element = self._linked(
+            '<div><a href="chapter.html">Cover Page</a></div>')
+        element.get_content()
+        element.add_translation('⟦1⟧ Kapak Sayfası')
+
+        translated = xhtml.find('.//x:div', namespaces=ns)
+        self.assertIsNone(translated.find('.//x:a', namespaces=ns))
+        self.assertIn('Kapak Sayfası', ''.join(translated.itertext()))
+        self.assertNotIn('⟦', get_string(translated))
+
+    def test_foreign_marker_is_removed(self):
+        xhtml, element = self._linked('<p>Please share.</p>')
+        element.get_content()
+        element.add_translation('Lütfen ⟦1254⟧ paylaşın ⟦/1254⟧.')
+
+        translated = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('Lütfen paylaşın.', ''.join(translated.itertext()))
+        self.assertNotIn('⟦', get_string(translated))
+
+    def test_image_link_is_reserved_whole(self):
+        xhtml, element = self._linked(
+            '<p>See <a href="page.html"><img src="i.jpg"/></a> now</p>')
+        self.assertEqual('See {{id_00000}} now', element.get_content())
+        self.assertIn('href="page.html"', element.reserve_elements[0])
+        self.assertIn('i.jpg', element.reserve_elements[0])
+        element.add_translation('Bakın {{id_00000}} şimdi')
+
+        link = xhtml.find('.//x:a', namespaces=ns)
+        self.assertEqual('page.html', link.get('href'))
+        self.assertEqual(
+            'i.jpg', link.find('.//x:img', namespaces=ns).get('src'))
+
+    def test_link_id_stays_only_when_replacing(self):
+        _xhtml, element = self._linked(
+            '<p><a id="here" href="page.html">Here</a></p>')
+        element.position = 'below'
+        element.get_content()
+        element.add_translation('⟦1⟧ Burada ⟦/1⟧')
+
+        links = element.element.getparent().findall('.//x:a', namespaces=ns)
+        self.assertEqual('here', links[0].get('id'))
+        self.assertIsNone(links[1].get('id'))
+        self.assertEqual('page.html', links[1].get('href'))
+
+    def test_inline_formatting_is_marked_and_restored(self):
+        xhtml, element = self._linked(
+            '<p>Please <em>share</em> our <strong>books</strong> '
+            'and <i class="note">thanks</i>.</p>')
+        self.assertEqual(
+            'Please ⟦3⟧ share ⟦/3⟧ our ⟦2⟧ books ⟦/2⟧ and '
+            '⟦1⟧ thanks ⟦/1⟧.', element.get_content())
+        self.assertEqual('<em>', element.links[3])
+        self.assertEqual('<strong>', element.links[2])
+        self.assertIn('class="note"', element.links[1])
+        element.add_translation(
+            'Lütfen ⟦3⟧ paylaşın ⟦/3⟧ bizim ⟦2⟧ kitaplarımızı ⟦/2⟧ '
+            've ⟦1⟧ teşekkürler ⟦/1⟧.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('paylaşın', paragraph.find('.//x:em', namespaces=ns).text)
+        self.assertEqual(
+            'kitaplarımızı',
+            paragraph.find('.//x:strong', namespaces=ns).text)
+        italic = paragraph.find('.//x:i', namespaces=ns)
+        self.assertEqual('note', italic.get('class'))
+        self.assertEqual('teşekkürler', italic.text)
+        self.assertNotIn('⟦', get_string(paragraph))
+
+    def test_formatting_inside_a_link(self):
+        xhtml, element = self._linked(
+            '<p>Please <em>share <a href="mission.html">our books</a></em>'
+            ' today.</p>')
+        self.assertEqual(
+            'Please ⟦2⟧ share ⟦1⟧ our books ⟦/1⟧ ⟦/2⟧ today.',
+            element.get_content())
+        element.add_translation(
+            'Lütfen ⟦2⟧ paylaşın ⟦1⟧ kitaplarımızı ⟦/1⟧ ⟦/2⟧ bugün.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        emphasis = paragraph.find('.//x:em', namespaces=ns)
+        link = emphasis.find('.//x:a', namespaces=ns)
+        self.assertEqual('mission.html', link.get('href'))
+        self.assertEqual('kitaplarımızı', link.text)
+        self.assertEqual('paylaşın ', emphasis.text)
+        self.assertNotIn('⟦', get_string(paragraph))
+
+    def test_nested_bold_italic(self):
+        xhtml, element = self._linked('<p><strong><em>both</em></strong></p>')
+        self.assertEqual('⟦2⟧ ⟦1⟧ both ⟦/1⟧ ⟦/2⟧', element.get_content())
+        element.add_translation('⟦2⟧ ⟦1⟧ ikisi ⟦/1⟧ ⟦/2⟧')
+
+        strong = xhtml.find('.//x:strong', namespaces=ns)
+        self.assertEqual('ikisi', strong.find('.//x:em', namespaces=ns).text)
+
+    def test_plain_span_is_not_marked(self):
+        _xhtml, element = self._linked(
+            '<p><span>plain</span> <span class="emph">styled</span></p>')
+        self.assertEqual('plain ⟦1⟧ styled ⟦/1⟧', element.get_content())
+        self.assertIn('class="emph"', element.links[1])
+
+    def test_paragraph_tag_is_not_marked_again(self):
+        _xhtml, element = self._linked('<em>All of it</em>')
+        self.assertEqual('All of it', element.get_content())
+        self.assertEqual({}, element.links)
+
+    def test_bold_italic_and_color_keep_their_tags(self):
+        xhtml, element = self._linked(
+            '<p><b>bold</b> <i>italic</i> '
+            '<span style="color:red">red</span></p>')
+        self.assertEqual(
+            '⟦3⟧ bold ⟦/3⟧ ⟦2⟧ italic ⟦/2⟧ ⟦1⟧ red ⟦/1⟧',
+            element.get_content())
+        element.add_translation(
+            '⟦3⟧ kalın ⟦/3⟧ ⟦2⟧ italik ⟦/2⟧ ⟦1⟧ kırmızı ⟦/1⟧')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('kalın', paragraph.find('.//x:b', namespaces=ns).text)
+        self.assertEqual('italik', paragraph.find('.//x:i', namespaces=ns).text)
+        colored = paragraph.find('.//x:span', namespaces=ns)
+        self.assertEqual('color:red', colored.get('style'))
+        self.assertEqual('kırmızı', colored.text)
+        self.assertIsNone(paragraph.find('.//x:strong', namespaces=ns))
+        self.assertIsNone(paragraph.find('.//x:em', namespaces=ns))
+
+    def test_formatting_inside_the_link_element(self):
+        xhtml, element = self._linked(
+            '<a href="mission.html"><em>our books</em></a>')
+        self.assertEqual('⟦1⟧ our books ⟦/1⟧', element.get_content())
+        self.assertEqual('<em>', element.links[1])
+        element.add_translation('⟦1⟧ kitaplarımız ⟦/1⟧')
+
+        link = xhtml.find('.//x:a', namespaces=ns)
+        self.assertEqual('mission.html', link.get('href'))
+        self.assertEqual(
+            'kitaplarımız', link.find('.//x:em', namespaces=ns).text)
+
+    def test_lost_formatting_marker_keeps_the_words(self):
+        xhtml, element = self._linked('<p>Please <em>share</em> today.</p>')
+        element.get_content()
+        element.add_translation('Lütfen ⟦1⟧ paylaşın today.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertIsNone(paragraph.find('.//x:em', namespaces=ns))
+        self.assertIn('paylaşın', ''.join(paragraph.itertext()))
+        self.assertNotIn('⟦', get_string(paragraph))
+
     def test_get_attributes(self):
         self.assertEqual('{"class": "abc"}', self.element.get_attributes())
 

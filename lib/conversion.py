@@ -73,6 +73,9 @@ def convert_book(
         elements.extend(get_page_elements(oeb.manifest.items))
         original_group = element_handler.prepare_original(elements)
         cache.save(original_group)
+        if any('⟦' in (item[3] or '') for item in original_group):
+            translation.translator.set_prompt_extension(
+                pdf_prompt_extension())
 
         paragraphs = cache.all_paragraphs()
         translation.handle(paragraphs)

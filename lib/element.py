@@ -24,6 +24,15 @@ def get_name(element):
     return etree.QName(element).localname
 
 
+# The same markers the PDF path uses. They contain no words, so an engine
+# has nothing to translate, and the spaces keep the words detachable.
+_LINK_MARKER = re.compile(r'⟦\s*(/)?\s*(\d+)\s*⟧')
+# Inline formatting whose words are translated and whose tag comes back.
+# sub, sup and code stay reserved instead: a note number or a code span is
+# kept verbatim.
+_INLINE_TAGS = ('em', 'i', 'strong', 'b', 'u', 'mark', 'del', 'ins', 'cite')
+
+
 class Element:
     def __init__(self, element, page_id=None, ignored=False):
         self.element = element
@@ -43,6 +52,7 @@ class Element:
 
         self.remove_pattern = None
         self.reserve_pattern = None
+        self.links = {}
 
     def _element_copy(self):
         return copy.deepcopy(self.element)
@@ -254,6 +264,9 @@ class PageElement(Element):
         parent.remove(element)
 
     def get_content(self):
+        # Rebuilt on every call. add_translations() extracts again, and the
+        # links have to belong to that extraction.
+        self.links = {}
         element_copy = self._element_copy()
         if self.remove_pattern is not None:
             for noise in element_copy.xpath(
@@ -262,6 +275,7 @@ class PageElement(Element):
         elements = []
         if self.reserve_pattern is not None:
             elements = element_copy.xpath(self.reserve_pattern, namespaces=ns)
+        elements = self._hoist_textless_links(element_copy, elements)
         for eid, element in enumerate(elements):
             replacement = self.placeholder[0].format(format(eid, '05'))
             if get_name(element) in ('sub', 'sup'):
@@ -272,7 +286,162 @@ class PageElement(Element):
                     elements[eid] = element = parent
             self.reserve_elements.append(get_string(element, True))
             self._safe_remove(element, replacement)
+        self._mark_runs(element_copy)
         return trim(''.join(element_copy.itertext()))
+
+    def _textless_link_ancestor(self, node, root):
+        """An ancestor link that has an address but no words of its own."""
+        parent = node.getparent()
+        found = None
+        while parent is not None and parent is not root:
+            if get_name(parent) == 'a' and parent.get('href') \
+                    and ''.join(parent.itertext()).strip() == '':
+                found = parent
+            parent = parent.getparent()
+        return found
+
+    def _hoist_textless_links(self, root, elements):
+        """Keep an image link whole. It has no words to translate."""
+        if get_name(root) == 'a':
+            return elements
+        chosen, seen = [], set()
+        for element in elements:
+            anchor = self._textless_link_ancestor(element, root)
+            if anchor is None:
+                chosen.append(element)
+                continue
+            if id(anchor) in seen:
+                continue
+            seen.add(id(anchor))
+            chosen.append(anchor)
+        return chosen
+
+    def _is_marked_run(self, node, root):
+        """A link or an inline run whose tag should wrap the translation.
+
+        The paragraph element itself is not marked. Its tag is copied onto
+        the translation, so marking it would wrap the words twice.
+        """
+        if node is root or not isinstance(getattr(node, 'tag', None), str):
+            return False
+        name = get_name(node)
+        if name == 'a':
+            return bool(node.get('href')) and get_name(root) != 'a'
+        if name in _INLINE_TAGS:
+            return True
+        return name == 'span' and bool(node.get('class') or node.get('style'))
+
+    def _mark_runs(self, root):
+        """Send each link and formatted run between a pair of markers.
+
+        Children are marked first. An italic link therefore keeps both the
+        emphasis and the address, and the words between the markers are what
+        the engine translates.
+        """
+        nodes = [
+            node for node in root.iter() if self._is_marked_run(node, root)]
+        number = 1
+        for node in reversed(nodes):
+            if node.getparent() is None:
+                continue
+            body = ' '.join(''.join(node.itertext()).split())
+            if body == '':
+                continue
+            self.links[number] = self._open_tag(node)
+            for child in list(node):
+                node.remove(child)
+            node.text = '⟦%d⟧ %s ⟦/%d⟧' % (number, body, number)
+            number += 1
+
+    def _open_tag(self, node):
+        nsmap = {}
+        current = node
+        while current is not None:
+            for prefix, uri in (current.nsmap or {}).items():
+                if prefix and uri and prefix not in nsmap:
+                    nsmap[prefix] = uri
+            current = current.getparent()
+        parts, declared = [], set()
+        for key, value in node.attrib.items():
+            if key.startswith('{'):
+                qualified = etree.QName(key)
+                prefix = next(
+                    (name for name, uri in nsmap.items()
+                     if uri == qualified.namespace), None)
+                if not prefix:
+                    prefix = 'ns'
+                local = '%s:%s' % (prefix, qualified.localname)
+                if prefix not in declared:
+                    uri = nsmap.get(prefix, qualified.namespace)
+                    parts.append('xmlns:%s="%s"' % (prefix, xml_escape(uri)))
+                    declared.add(prefix)
+            else:
+                local = key
+            if local == 'id' and self.position != 'only':
+                continue
+            escaped = xml_escape(value).replace('"', '&quot;')
+            parts.append('%s="%s"' % (local, escaped))
+        name = get_name(node)
+        return '<%s %s>' % (name, ' '.join(parts)) if parts else '<%s>' % name
+
+    def _close_tag(self, open_tag):
+        match = re.match(r'<\s*([^\s>/]+)', open_tag or '')
+        return '</%s>' % match.group(1) if match else ''
+
+    def _restore_links(self, translation):
+        """Turn marker pairs back into links and inline formatting. A marker
+        this paragraph did not create, or a pair the engine left incomplete,
+        is removed. The words on either side stay.
+        """
+        if '⟦' not in translation:
+            return translation
+        links = self.links or {}
+        tokens, position = [], 0
+        for match in _LINK_MARKER.finditer(translation):
+            if match.start() > position:
+                tokens.append(('text', translation[position:match.start()]))
+            kind = 'close' if match.group(1) else 'open'
+            tokens.append((kind, int(match.group(2))))
+            position = match.end()
+        if position < len(translation):
+            tokens.append(('text', translation[position:]))
+        opened, closed = set(), set()
+        for kind, number in tokens:
+            if kind == 'open':
+                opened.add(number)
+            else:
+                closed.add(number)
+        valid = opened & closed & set(links)
+        parts, stack = [], []
+        for index, (kind, value) in enumerate(tokens):
+            if kind == 'text':
+                previous = tokens[index - 1][0] if index else None
+                following = tokens[index + 1][0] \
+                    if index + 1 < len(tokens) else None
+                if previous == 'open' and value[:1].isspace():
+                    value = value[1:]
+                if following == 'close' and value[-1:].isspace():
+                    value = value[:-1]
+                parts.append(value)
+                continue
+            if value not in valid:
+                continue
+            if kind == 'open':
+                if not stack or stack[-1] != value:
+                    stack.append(value)
+                    parts.append(links[value])
+                continue
+            if value not in stack:
+                continue
+            while stack:
+                inner = stack.pop()
+                parts.append(self._close_tag(links.get(inner)))
+                if inner == value:
+                    break
+        while stack:
+            inner = stack.pop()
+            parts.append(self._close_tag(links.get(inner)))
+        return ''.join(parts)
 
     def _polish_translation(self, translation):
         translation = translation.replace('\n', '<br/>')
@@ -342,10 +511,22 @@ class PageElement(Element):
         # the engine dropped instead of losing them silently.
         if missing:
             translation += ''.join(missing)
-        translation = self._polish_translation(translation)
-
+        prepared = translation
+        linked = self._restore_links(prepared)
+        try:
+            translation = self._polish_translation(linked)
+            new_element = self._create_new_element(
+                get_name(self.element), translation)
+        except Exception:
+            # A broken marker must not discard the translation.
+            log.warning(
+                'Could not restore inline formatting in the translation. '
+                'The text was kept without that formatting.')
+            translation = self._polish_translation(
+                _LINK_MARKER.sub('', prepared))
+            new_element = self._create_new_element(
+                get_name(self.element), translation)
         element_name = get_name(self.element)
-        new_element = self._create_new_element(element_name, translation)
 
         # Add translation for table elements.
         group_elements = ('li', 'th', 'td', 'caption')

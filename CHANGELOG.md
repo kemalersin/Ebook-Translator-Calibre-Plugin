@@ -1,3 +1,10 @@
+## v2.4.12
+
+1. fix: Bold, italic and the other inline runs in an EPUB keep their tags. The words are translated between the same `⟦n⟧` markers as links, and a dropped marker leaves the translation as plain text.
+2. fix: Links in EPUB (and other HTML-based) translations keep their address. The visible words are translated between `⟦n⟧` and `⟦/n⟧` markers and written back inside the link. A marker the engine drops or invents is removed, and the translated words stay.
+
+---
+
 ## v2.4.10
 
 1. change: PDF output writes each paragraph in one placement, reads a page once when it restores links, and skips the drawing scan on a page that has none. Stacked lines are cleared together. Wrapping, color, links, underlines and leaders stay the same.

@@ -213,7 +213,9 @@ class TranslationWorker(QObject):
         if is_srt and translator.merge_enabled:
             translator.set_prompt_extension(
                 srt_prompt_extension(translator.placeholder))
-        elif is_pdf_layout(self.input_format, self.output_format):
+        elif is_pdf_layout(self.input_format, self.output_format) or any(
+                '⟦' in (getattr(item, 'original', '') or '')
+                for item in paragraphs):
             translator.set_prompt_extension(pdf_prompt_extension())
         translation = get_translation(translator)
         translation.set_fresh(fresh)
