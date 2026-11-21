@@ -1,3 +1,9 @@
+## v2.4.14
+
+1. fix: A drop cap takes the first letter of the translated word. The original letter is joined back onto its word before translation, and the opening quotes stay in front.
+
+---
+
 ## v2.4.13
 
 1. fix: Footnote numbers in an EPUB are written once. The reserved notes are rebuilt on every extraction, so the second pass no longer appends the same numbers after the translation.

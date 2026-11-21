@@ -31,6 +31,10 @@ _LINK_MARKER = re.compile(r'⟦\s*(/)?\s*(\d+)\s*⟧')
 # sub, sup and code stay reserved instead: a note number or a code span is
 # kept verbatim.
 _INLINE_TAGS = ('em', 'i', 'strong', 'b', 'u', 'mark', 'del', 'ins', 'cite')
+# Quotes and the other leading marks are not part of the word. A leftover
+# {{id_00000}} must not donate its letters to a drop cap.
+_XML_ENTITY = re.compile(
+    r'&(?:#x[0-9A-Fa-f]+|#\d+|[A-Za-z][A-Za-z0-9]+);')
 
 
 class Element:
@@ -53,6 +57,7 @@ class Element:
         self.remove_pattern = None
         self.reserve_pattern = None
         self.links = {}
+        self.drop_cap = None
 
     def _element_copy(self):
         return copy.deepcopy(self.element)
@@ -269,6 +274,7 @@ class PageElement(Element):
         # Keeping the previous reserves would append every footnote twice.
         self.links = {}
         self.reserve_elements = []
+        self.drop_cap = None
         element_copy = self._element_copy()
         if self.remove_pattern is not None:
             for noise in element_copy.xpath(
@@ -288,6 +294,7 @@ class PageElement(Element):
                     elements[eid] = element = parent
             self.reserve_elements.append(get_string(element, True))
             self._safe_remove(element, replacement)
+        self._detach_drop_cap(element_copy)
         self._mark_runs(element_copy)
         return trim(''.join(element_copy.itertext()))
 
@@ -317,6 +324,150 @@ class PageElement(Element):
             seen.add(id(anchor))
             chosen.append(anchor)
         return chosen
+
+    def _text_before(self, node, root):
+        parts = []
+
+        def walk(current):
+            if current is node:
+                return True
+            if not isinstance(getattr(current, 'tag', None), str):
+                return False
+            if current.text:
+                parts.append(current.text)
+            for child in current:
+                if walk(child):
+                    return True
+                if child.tail:
+                    parts.append(child.tail)
+            return False
+
+        walk(root)
+        return ''.join(parts)
+
+    def _word_continues(self, text):
+        return bool(text) and text[0].isalpha()
+
+    def _continuation(self, node, root):
+        """The text that keeps going as the same word, with no space between.
+
+        The rest of the word may sit in this element's tail, in the next
+        element's text, or on an ancestor when the letter is wrapped again.
+        """
+        current = node
+        while current is not None and current is not root:
+            if self._word_continues(current.tail):
+                return current, 'tail'
+            if current.tail:
+                return None
+            sibling = current.getnext()
+            if sibling is not None:
+                if isinstance(getattr(sibling, 'tag', None), str) \
+                        and self._word_continues(sibling.text):
+                    return sibling, 'text'
+                return None
+            current = current.getparent()
+        return None
+
+    def _could_be_drop_cap(self, node, root):
+        """One styled letter glued to the rest of its word.
+
+        "I said" stays a word: a space follows the letter. A picture letter
+        has no character to move, so it is left alone.
+        """
+        if not self._is_marked_run(node, root) or get_name(node) == 'a':
+            return False
+        letter = ''.join(node.itertext())
+        if len(letter) != 1 or not letter.isalpha():
+            return False
+        return self._continuation(node, root) is not None
+
+    def _detach_drop_cap(self, root):
+        """Give the engine the whole word, and remember the letter's tag.
+
+        The translated word lends its first letter back to that tag.
+        """
+        chosen = None
+        for node in root.iter():
+            if node is root or not isinstance(getattr(node, 'tag', None), str):
+                continue
+            if any(char.isalnum() for char in self._text_before(node, root)):
+                break
+            if self._could_be_drop_cap(node, root):
+                chosen = node
+        if chosen is None:
+            return
+        found = self._continuation(chosen, root)
+        if found is None:
+            return
+        owner, kind = found
+        letter = ''.join(chosen.itertext())
+        self.drop_cap = self._open_tag(chosen)
+        if kind == 'text':
+            owner.text = letter + owner.text
+            self._safe_remove(chosen)
+        elif owner is chosen:
+            self._safe_remove(chosen, letter)
+        else:
+            owner.tail = letter + owner.tail
+            self._safe_remove(chosen)
+
+    def _apply_drop_cap(self, translation):
+        """Wrap the translated word's first letter in the saved tag.
+
+        Quotes in front of it stay where they are. With no letter to wrap,
+        the translation is left untouched.
+        """
+        open_tag = self.drop_cap
+        if not open_tag or not translation:
+            return translation
+        close_tag = self._close_tag(open_tag)
+        if not close_tag:
+            return translation
+        index = self._first_letter_index(translation)
+        if index is None:
+            return translation
+        letter = translation[index]
+        return ''.join((
+            translation[:index], open_tag, letter, close_tag,
+            translation[index + 1:]))
+
+    def _first_letter_index(self, translation):
+        index, length = 0, len(translation)
+        while index < length:
+            char = translation[index]
+            if char.isspace() or (not char.isalnum() and char not in '<&{'):
+                index += 1
+                continue
+            if translation.startswith('{{', index):
+                end = translation.find('}}', index + 2)
+                if end == -1:
+                    return None
+                index = end + 2
+                continue
+            if char == '{':
+                index += 1
+                continue
+            if char == '&':
+                entity = _XML_ENTITY.match(translation, index)
+                if entity is None:
+                    return None
+                index = entity.end()
+                continue
+            if char == '<':
+                end = translation.find('>', index)
+                if end == -1:
+                    return None
+                index = end + 1
+                continue
+            if char.isalpha():
+                return index
+            return None
+        return None
+
+    def _element_from_translation(self, text):
+        text = self._polish_translation(self._apply_drop_cap(text))
+        return self._create_new_element(get_name(self.element), text), text
 
     def _is_marked_run(self, node, root):
         """A link or an inline run whose tag should wrap the translation.
@@ -516,18 +667,21 @@ class PageElement(Element):
         prepared = translation
         linked = self._restore_links(prepared)
         try:
-            translation = self._polish_translation(linked)
-            new_element = self._create_new_element(
-                get_name(self.element), translation)
+            new_element, translation = self._element_from_translation(linked)
         except Exception:
-            # A broken marker must not discard the translation.
+            # A broken marker must not discard the translation. If the drop
+            # cap tag itself cannot be parsed, the words still stay.
             log.warning(
                 'Could not restore inline formatting in the translation. '
                 'The text was kept without that formatting.')
-            translation = self._polish_translation(
-                _LINK_MARKER.sub('', prepared))
-            new_element = self._create_new_element(
-                get_name(self.element), translation)
+            plain = _LINK_MARKER.sub('', prepared)
+            try:
+                new_element, translation = self._element_from_translation(
+                    plain)
+            except Exception:
+                translation = self._polish_translation(plain)
+                new_element = self._create_new_element(
+                    get_name(self.element), translation)
         element_name = get_name(self.element)
 
         # Add translation for table elements.

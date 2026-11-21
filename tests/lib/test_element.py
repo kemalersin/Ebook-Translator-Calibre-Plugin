@@ -680,6 +680,93 @@ class TestPageElement(unittest.TestCase):
         self.assertIn('paylaşın', ''.join(paragraph.itertext()))
         self.assertNotIn('⟦', get_string(paragraph))
 
+    def test_drop_cap_uses_the_translated_letter(self):
+        xhtml, element = self._linked(
+            '<p>“<span class="dropcap">Y</span>ou can thank me.</p>')
+        self.assertEqual('“You can thank me.', element.get_content())
+        self.assertEqual({}, element.links)
+        self.assertIn('class="dropcap"', element.drop_cap)
+        element.add_translation('“Bana teşekkür edebilirsin.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        letter = paragraph.find('.//x:span', namespaces=ns)
+        self.assertEqual('dropcap', letter.get('class'))
+        self.assertEqual('B', letter.text)
+        self.assertEqual('ana teşekkür edebilirsin.', letter.tail)
+        self.assertEqual(
+            '“Bana teşekkür edebilirsin.', ''.join(paragraph.itertext()))
+        self.assertNotIn('Y', ''.join(paragraph.itertext()))
+
+    def test_drop_cap_nested_under_the_opening_quote(self):
+        xhtml, element = self._linked(
+            '<p><span class="oq">“<span class="dropcap">Y</span></span>'
+            'ou can.</p>')
+        self.assertEqual('⟦1⟧ “ ⟦/1⟧You can.', element.get_content())
+        self.assertIn('class="dropcap"', element.drop_cap)
+        element.add_translation('⟦1⟧ “ ⟦/1⟧Bana olur.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        letter = paragraph.find('.//x:span[@class="dropcap"]', namespaces=ns)
+        self.assertEqual('B', letter.text)
+        self.assertEqual('“Bana olur.', ''.join(paragraph.itertext()))
+
+    def test_drop_cap_glued_through_the_next_element(self):
+        xhtml, element = self._linked(
+            '<p><span class="dropcap">Y</span>'
+            '<span class="rest">ou can</span> today.</p>')
+        self.assertEqual('⟦1⟧ You can ⟦/1⟧ today.', element.get_content())
+        element.add_translation('⟦1⟧ Bana ⟦/1⟧ bugün.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        letter = paragraph.find('.//x:span[@class="dropcap"]', namespaces=ns)
+        self.assertEqual('B', letter.text)
+        self.assertIn('ana bugün.', ''.join(paragraph.itertext()))
+
+    def test_drop_cap_keeps_later_formatting(self):
+        xhtml, element = self._linked(
+            '<p><span class="dropcap">Y</span>ou can <em>share</em>.</p>')
+        self.assertEqual('You can ⟦1⟧ share ⟦/1⟧.', element.get_content())
+        element.add_translation('Bana ⟦1⟧ paylaş ⟦/1⟧.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        letter = paragraph.find('.//x:span', namespaces=ns)
+        self.assertEqual('B', letter.text)
+        self.assertEqual(
+            'paylaş', paragraph.find('.//x:em', namespaces=ns).text)
+        self.assertEqual('Bana paylaş.', ''.join(paragraph.itertext()))
+
+    def test_spaced_letter_is_not_a_drop_cap(self):
+        xhtml, element = self._linked('<p><em>I</em> said nothing.</p>')
+        self.assertEqual('⟦1⟧ I ⟦/1⟧ said nothing.', element.get_content())
+        self.assertIsNone(element.drop_cap)
+        element.add_translation('⟦1⟧ Ben ⟦/1⟧ hiçbir şey demedim.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('Ben', paragraph.find('.//x:em', namespaces=ns).text)
+        self.assertIsNone(paragraph.find('.//x:span', namespaces=ns))
+
+    def test_article_with_a_space_stays_whole(self):
+        xhtml, element = self._linked(
+            '<p><span class="dropcap">A</span> chapter opens.</p>')
+        self.assertEqual('⟦1⟧ A ⟦/1⟧ chapter opens.', element.get_content())
+        self.assertIsNone(element.drop_cap)
+        element.add_translation('⟦1⟧ Bir ⟦/1⟧ bölüm açılır.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        styled = paragraph.find('.//x:span', namespaces=ns)
+        self.assertEqual('Bir', styled.text)
+        self.assertEqual('dropcap', styled.get('class'))
+
+    def test_drop_cap_without_a_letter_keeps_the_words(self):
+        xhtml, element = self._linked(
+            '<p><span class="dropcap">Y</span>ou can.</p>')
+        element.get_content()
+        element.add_translation('...')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertIsNone(paragraph.find('.//x:span', namespaces=ns))
+        self.assertEqual('...', ''.join(paragraph.itertext()))
+
     def test_get_attributes(self):
         self.assertEqual('{"class": "abc"}', self.element.get_attributes())
 
