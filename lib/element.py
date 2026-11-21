@@ -265,8 +265,10 @@ class PageElement(Element):
 
     def get_content(self):
         # Rebuilt on every call. add_translations() extracts again, and the
-        # links have to belong to that extraction.
+        # links and reserved elements have to belong to that extraction.
+        # Keeping the previous reserves would append every footnote twice.
         self.links = {}
+        self.reserve_elements = []
         element_copy = self._element_copy()
         if self.remove_pattern is not None:
             for noise in element_copy.xpath(

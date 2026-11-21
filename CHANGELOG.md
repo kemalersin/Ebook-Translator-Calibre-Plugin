@@ -1,3 +1,10 @@
+## v2.4.13
+
+1. fix: Footnote numbers in an EPUB are written once. The reserved notes are rebuilt on every extraction, so the second pass no longer appends the same numbers after the translation.
+2. fix: A worksheet row of dots without a page number stays one paragraph. It is no longer treated as a contents line.
+
+---
+
 ## v2.4.12
 
 1. fix: Bold, italic and the other inline runs in an EPUB keep their tags. The words are translated between the same `⟦n⟧` markers as links, and a dropped marker leaves the translation as plain text.

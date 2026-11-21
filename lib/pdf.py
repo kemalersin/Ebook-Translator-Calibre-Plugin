@@ -887,16 +887,45 @@ def _is_cell_line(line, lines):
         for other in neighbors)
 
 
+_DOT_LEADER = set('.·∙•⋅')
+
+
+def _leader_cut(head):
+    """Where a trailing leader starts. One pass, so a long row of dots ends."""
+    index, dots = len(head), 0
+    while index > 0 and (
+            head[index - 1].isspace() or head[index - 1] in _DOT_LEADER):
+        if head[index - 1] in _DOT_LEADER:
+            dots += 1
+        index -= 1
+    if dots >= 3 or (dots == 0 and len(head) - index >= 3):
+        return index
+    return None
+
+
 def leader_split(text):
     """A contents row: the words, then dots or a wide gap, then a page number.
 
     Justified prose can have a wide gap too. A row counts only when that gap
     is the leader in front of a short page number, or when the leader is dots.
+    A worksheet row of dots has no page number; it is not a contents row.
     """
-    match = _LEADER_ROW.match((text or '').strip())
-    if not match or not re.search(r'[^\W\d_]', match.group('label'), re.U):
+    text = (text or '').strip()
+    end = len(text)
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    start = end
+    while start > 0 and text[start - 1].isdigit():
+        start -= 1
+    if not 1 <= end - start <= 4:
         return None
-    return match.group('label').strip(), match.group('trailer')
+    cut = _leader_cut(text[:start].rstrip())
+    if cut is None:
+        return None
+    label = text[:start].rstrip()[:cut].strip()
+    if not label or not re.search(r'[^\W\d_]', label, re.U):
+        return None
+    return label, text[start:end]
 
 
 def _is_leader_line(line):
@@ -1062,19 +1091,29 @@ def _run_record(key, links):
     return record
 
 
-# Spaces and dot leaders that only stretch a contents entry to the page number.
-_LEADER = re.compile(r'(?:\s*[.·∙•⋅]\s*){3,}|[ \t]{2,}')
-# A whole line that is only a label, a leader, and a page number.
-_LEADER_ROW = re.compile(
-    r'^(?P<label>.+?[^\s.·∙•⋅])'
-    r'(?:(?:\s*[.·∙•⋅]\s*){3,}|[ \t]{3,})'
-    r'(?P<trailer>\d{1,4})\s*$')
 _NOTE = re.compile(r'⟦\^(\d{1,3})⟧')
 
 
 def _link_text(text):
     """The words of a link, without the padding after them."""
-    return _LEADER.sub(' ', text).strip()
+    parts, index, size = [], 0, len(text)
+    while index < size:
+        if text[index] in ' \t' or text[index] in _DOT_LEADER:
+            nxt, dots = index, 0
+            while nxt < size and (
+                    text[nxt] in ' \t' or text[nxt] in _DOT_LEADER):
+                if text[nxt] in _DOT_LEADER:
+                    dots += 1
+                nxt += 1
+            if dots >= 3 or (dots == 0 and nxt - index >= 2):
+                parts.append(' ')
+            else:
+                parts.append(text[index:nxt])
+            index = nxt
+        else:
+            parts.append(text[index])
+            index += 1
+    return ''.join(parts).strip()
 
 
 def _pieces_of_line(line, links):

@@ -18,6 +18,7 @@ from ...lib.pdf import (
     split_block, get_page_paragraphs,
     get_style, get_family, make_paragraph, set_frames, is_continuation,
     chain_paragraphs, split_translation, find_wheel, install_pymupdf,
+    leader_split,
     get_installed_version, load_pymupdf, is_pdf_layout, PdfElement,
     get_pdf_elements, compose_pdf, write_part, get_css, get_rules,
     mark_lines, column_separators, LIST_ITEM, render_markup, font_variants,
@@ -315,6 +316,13 @@ class TestSplitBlock(unittest.TestCase):
             [item['text'] for item in made])
         self.assertEqual(
             ['1', '2'], [item['trailer']['text'] for item in made])
+
+    def test_dotted_worksheet_is_not_a_leader(self):
+        text = 'Age' + '. .' * 40 + '.'
+        self.assertIsNone(leader_split(text))
+        made = make_paragraph(0, get_lines(block(line(text, 40, 100, 400))))
+        self.assertNotIn('leader', made)
+        self.assertTrue(made['text'].startswith('Age'))
 
     def test_raised_note_leaves_the_words(self):
         body = span('Footnotes', size=11)

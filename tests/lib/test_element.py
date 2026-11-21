@@ -736,6 +736,42 @@ class TestPageElement(unittest.TestCase):
         self.assertEqual('40%', right_td.get('width'))
         self.assertIsNone(right_td.text)
 
+    def test_footnote_numbers_stay_single_when_extracted_twice(self):
+        xhtml = etree.XML(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<p>dedi.<a href="#n12"><sup>12</sup></a>'
+            b'<a href="#n13"><sup>13</sup></a></p></body></html>')
+        element = PageElement(xhtml.find('.//x:p', namespaces=ns), 'p1')
+        element.reserve_pattern = create_xpath(('sup',))
+        element.set_placeholder(Base.placeholder)
+        element.position = 'only'
+        content = element.get_content()
+        # prepare_original() and add_translations() each extract the content.
+        self.assertEqual(content, element.get_content())
+        self.assertEqual(2, len(element.reserve_elements))
+        element.add_translation('söyledi.{{id_00000}}{{id_00001}}')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('söyledi.1213', ''.join(paragraph.itertext()))
+        self.assertEqual(1, get_string(paragraph, True).count('>12<'))
+        self.assertEqual(1, get_string(paragraph, True).count('>13<'))
+
+    def test_dropped_footnote_is_kept_once_after_second_extraction(self):
+        xhtml = etree.XML(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<p>dedi.<a href="#n16"><sup>16</sup></a></p></body></html>')
+        element = PageElement(xhtml.find('.//x:p', namespaces=ns), 'p1')
+        element.reserve_pattern = create_xpath(('sup',))
+        element.set_placeholder(Base.placeholder)
+        element.position = 'only'
+        element.get_content()
+        element.get_content()
+        element.add_translation('söyledi.')
+
+        paragraph = xhtml.find('.//x:p', namespaces=ns)
+        self.assertEqual('söyledi.16', ''.join(paragraph.itertext()))
+        self.assertEqual(1, get_string(paragraph, True).count('>16<'))
+
     def test_add_translation_keeps_dropped_reserved_elements(self):
         xhtml = etree.XML(
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
